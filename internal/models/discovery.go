@@ -123,7 +123,10 @@ type capabilityModel struct {
 	// v2-only fields.
 	Type         string                             `json:"type"`
 	Capabilities *capabilityModelCapabilities       `json:"capabilities"`
-	API          map[string]capabilityModelAPIEntry `json:"api"`
+	// The map holds pointers so an accessor can return the entry it selected. Go does not
+	// allow taking the address of a map value, and encoding/json allocates each pointer on
+	// decode, so the only cost is one allocation per lane.
+	API          map[string]*capabilityModelAPIEntry `json:"api"`
 	Cost         json.RawMessage                    `json:"cost"`
 }
 

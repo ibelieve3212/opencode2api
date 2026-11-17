@@ -3,9 +3,10 @@ package admin
 import (
 	"fmt"
 	"net/http"
+	"slices"
+
 	"github.com/ibelieve3212/opencode2api/internal/config"
 	"github.com/ibelieve3212/opencode2api/internal/httpx"
-	"slices"
 )
 
 // handleRotation reports the rotation state: both groups with their alias,
