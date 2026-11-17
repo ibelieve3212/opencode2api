@@ -149,18 +149,27 @@ jobs:
           if-no-files-found: error
 
   container:
-    name: Publish GHCR image
+    name: Build image ${{ matrix.arch }}
     needs: [prepare, verify]
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    # A native runner per architecture rather than one QEMU build. The reference project in this
+    # account publishes this way, and on a public repository both runner families are free.
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     steps:
       - name: Check out source
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -172,8 +181,42 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate image metadata
-        id: image_metadata
+      - name: Build and push this architecture
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          # A per-architecture tag for the merge job to assemble.
+          tags: ${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.release_tag }}-${{ matrix.arch }}
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.release_tag }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          # No attestation is published. The reference sets provenance false and no sbom, and
+          # keeping this identical is the whole point of the change.
+          provenance: false
+
+  container-merge:
+    name: Merge the image manifest
+    needs: [prepare, container]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute the image tags
+        id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ needs.prepare.outputs.image_name }}
@@ -187,20 +230,45 @@ jobs:
             org.opencontainers.image.description=OpenAI-compatible API gateway for OpenCode Zen and Go
             org.opencontainers.image.licenses=GPL-3.0-or-later
 
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.image_metadata.outputs.tags }}
-          labels: ${{ steps.image_metadata.outputs.labels }}
-          build-args: |
-            VERSION=${{ needs.prepare.outputs.release_tag }}
-          cache-from: type=gha,scope=container
-          cache-to: type=gha,mode=max,scope=container
-          provenance: mode=max
-          sbom: true
+      - name: Assemble the multi-architecture manifest
+        shell: bash
+        env:
+          BASE: ${{ needs.prepare.outputs.image_name }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -eu
+          amd64="${BASE}:${RELEASE_TAG}-amd64"
+          arm64="${BASE}:${RELEASE_TAG}-arm64"
+
+          tag_args=""
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            tag_args="${tag_args} -t ${tag}"
+          done <<< "${TAGS}"
+
+          if [ -z "${tag_args}" ]; then
+            echo "no tags were produced; refusing to continue" >&2
+            exit 1
+          fi
+
+          echo "merging ${amd64} and ${arm64}"
+          # shellcheck disable=SC2086
+          docker buildx imagetools create ${tag_args} "${amd64}" "${arm64}"
+
+      - name: Verify both architectures are present
+        shell: bash
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -eu
+          first="$(printf '%s\\n' "${TAGS}" | head -n 1)"
+          echo "inspecting ${first}"
+          docker buildx imagetools inspect "${first}" | tee /tmp/inspect.txt
+          # A merge that silently produced one architecture would otherwise pass.
+          grep -q "linux/amd64" /tmp/inspect.txt
+          grep -q "linux/arm64" /tmp/inspect.txt
+          echo "the manifest carries amd64 and arm64"
 
   release:
     name: Publish GitHub Release
