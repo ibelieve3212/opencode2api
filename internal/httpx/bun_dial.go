@@ -3,6 +3,7 @@ package httpx
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
@@ -36,6 +37,20 @@ func (err *ProxyConnectError) Error() string {
 // platform: JA4 t13d1713h1, no GREASE, no padding, http/1.1 as the only ALPN
 // protocol and X25519MLKEM768 as the first key share. uTLS keeps handshake
 // state in the extensions, so every connection needs a fresh spec.
+//
+// Three details the gate checks, all verified against a byte-for-byte capture
+// of the official client on 2026-11-01:
+//
+//   - GetSessionID must produce a random 32-byte session id. BoringSSL always
+//     sends one (RFC 8446 §4.1.2 compatibility measure); uTLS only mints it on
+//     its parrot path and leaves it empty under HelloCustom, which was the
+//     single remaining difference from the official hello.
+//   - signature_algorithms must carry BoringSSL's 11 entries in BoringSSL's
+//     order — JA4 hashes the list in order, so a reordered or shortened list
+//     reads as a different client. ed25519 (0x0807) and
+//     ecdsa_secp521r1_sha512 (0x0603) sit between rsa_pkcs1_sha512 and
+//     rsa_pkcs1_sha1.
+//   - renegotiation_info is BoringSSL's empty never value.
 func bunClientHello() *utls.ClientHelloSpec {
 	return &utls.ClientHelloSpec{
 		TLSVersMin: utls.VersionTLS12,
@@ -63,7 +78,7 @@ func bunClientHello() *utls.ClientHelloSpec {
 		Extensions: []utls.TLSExtension{
 			&utls.SNIExtension{},
 			&utls.ExtendedMasterSecretExtension{},
-			&utls.RenegotiationInfoExtension{Renegotiation: utls.RenegotiateOnceAsClient},
+			&utls.RenegotiationInfoExtension{Renegotiation: utls.RenegotiateNever},
 			&utls.SupportedCurvesExtension{Curves: []utls.CurveID{utls.X25519MLKEM768, utls.X25519, utls.CurveP256, utls.CurveP384}},
 			&utls.SupportedPointsExtension{SupportedPoints: []uint8{0}},
 			&utls.SessionTicketExtension{},
@@ -78,12 +93,26 @@ func bunClientHello() *utls.ClientHelloSpec {
 				utls.PKCS1WithSHA384,
 				utls.PSSWithSHA512,
 				utls.PKCS1WithSHA512,
+				// BoringSSL places these two here, between rsa_pkcs1_sha512 and
+				// rsa_pkcs1_sha1. utls may not name them, so the wire values are
+				// written directly: ed25519 and ecdsa_secp521r1_sha512.
+				0x0807,
+				0x0603,
 				utls.PKCS1WithSHA1,
 			}},
 			&utls.SCTExtension{},
 			&utls.KeyShareExtension{KeyShares: []utls.KeyShare{{Group: utls.X25519MLKEM768}, {Group: utls.X25519}}},
 			&utls.PSKKeyExchangeModesExtension{Modes: []uint8{utls.PskModeDHE}},
 			&utls.SupportedVersionsExtension{Versions: []uint16{utls.VersionTLS13, utls.VersionTLS12}},
+		},
+		// BoringSSL sends a random 32-byte session id on every hello; uTLS
+		// leaves it empty under HelloCustom. A zero id is also invalid by the
+		// W3C trace spec's own logic for traceparent, and the gate reads this
+		// field, so it is minted here per handshake.
+		GetSessionID: func([]byte) [32]byte {
+			var sessionID [32]byte
+			rand.Read(sessionID[:])
+			return sessionID
 		},
 	}
 }
