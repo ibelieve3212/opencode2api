@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1425,7 +1426,11 @@ func setV1Headers(header http.Header, protocol wire.Protocol, body []byte, ids i
 // x-opencode-project. The v2 gate rejects x-opencode-request and canonical
 // prj_* project ids with 403 FreeTierError, so neither is sent. Anthropic
 // requests carry a fixed anthropic-beta set; upstreamRequest adds
-// anthropic-version and the beta query.
+// anthropic-version and the beta query. The client's OpenTelemetry layer adds traceparent and b3 to every outbound
+// request — captured from a live 2.3.0 run: traceparent "00-<32hex>-<16hex>-01"
+// and b3 "<32hex>-<16hex>-1", both sharing the same trace and span ids. A
+// request without them is the one shape a real CLI never produces, so the
+// headers are minted here per request.
 func setV2Headers(header http.Header, protocol wire.Protocol, ids identity.RequestIDs) {
 	header.Set("x-opencode-client", "cli")
 	rootSession := ids.Session
@@ -1445,9 +1450,28 @@ func setV2Headers(header http.Header, protocol wire.Protocol, ids identity.Reque
 	header.Set("x-opencode-session-id", childSession)
 	header.Set("User-Agent", httpx.V2UserAgent())
 	header.Set("x-opencode-project", projectID(ids.Project))
+	setTraceHeaders(header)
 	if protocol == wire.Anthropic {
 		header.Set("anthropic-beta", "interleaved-thinking-2025-05-14")
 	}
+}
+
+// setTraceHeaders mints the W3C and B3 trace headers the client's telemetry
+// layer attaches to every request. A zeroed trace id is invalid by the W3C
+// spec, so both ids are drawn from crypto/rand.
+func setTraceHeaders(header http.Header) {
+	var trace [16]byte
+	var span [8]byte
+	if _, err := rand.Read(trace[:]); err != nil {
+		// crypto/rand failing leaves nothing useful to send; a missing header is
+		// a shape the gate has always tolerated, a malformed one is not.
+		return
+	}
+	rand.Read(span[:])
+	traceID := hex.EncodeToString(trace[:])
+	spanID := hex.EncodeToString(span[:])
+	header.Set("traceparent", "00-"+traceID+"-"+spanID+"-01")
+	header.Set("b3", traceID+"-"+spanID+"-1")
 }
 
 // v1ProviderUtils names the provider-utils version of the AI SDK package the
