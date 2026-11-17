@@ -44,8 +44,8 @@ jobs:
           fi
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
           # A package name the registry accepts. GITHUB_REPOSITORY would give opencode2api, and a
-# package by that name under this account refuses this repository with write_package, while
-# a fresh name in the same job pushes normally.
+          # package by that name under this account refuses this repository with write_package, while
+          # a fresh name in the same job pushes normally.
           echo "image_name=ghcr.io/${IMAGE_OWNER}/oc2api" >> "$GITHUB_OUTPUT"
 
   verify:
