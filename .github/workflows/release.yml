@@ -204,7 +204,10 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [prepare, build, container]
+    # The container job is deliberately not a dependency. The binaries and the image are
+    # separate deliverables, and a registry refusal — which GHCR applies to the first publish of
+    # a package under a personal account — must not withhold six successfully built binaries.
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
