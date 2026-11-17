@@ -161,17 +161,23 @@ const opencodeWorktreeGuidance = "When you create a worktree outside the current
 
 // opencodeToolNames lists the tool names a shaped Chat payload declares, so the base
 // prompt renders guidance for exactly the tools the request carries. A payload that
-// declares none falls back to the official core set, which shaping always appends.
-func opencodeToolNames(payload map[string]any) []string {
+// declares none falls back to the official set for the lane, which shaping always
+// appends.
+func opencodeToolNames(payload map[string]any, v1 bool) []string {
 	items, _ := payload["tools"].([]any)
 	names := make([]string, 0, len(items))
 	for _, item := range items {
-		if name := chatToolName(item); name != "" {
+		// A Chat tool is {"type":"function","function":{"name":…}}, which is the shape
+		// setToolName writes and the shape readToolName reads.
+		entry, _ := item.(map[string]any)
+		function, _ := entry["function"].(map[string]any)
+		name, _ := function["name"].(string)
+		if name = strings.TrimSpace(name); name != "" {
 			names = append(names, name)
 		}
 	}
 	if len(names) == 0 {
-		return coreTools
+		return officialToolNames(v1)
 	}
 	return names
 }
@@ -234,7 +240,7 @@ func injectOfficialPrompt(payload map[string]any, protocol wire.Protocol, v1 boo
 		return false
 	}
 	model, _ := payload["model"].(string)
-	prompt := opencodeSystemPrompt(model, v1, opencodeToolNames(payload), environment)
+	prompt := opencodeSystemPrompt(model, v1, opencodeToolNames(payload, v1), environment)
 	switch protocol {
 	case wire.Chat:
 		return injectChatPrompt(payload, prompt)

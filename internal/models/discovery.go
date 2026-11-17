@@ -120,14 +120,15 @@ type capabilityModel struct {
 	Modalities       *capabilityModelModalities `json:"modalities"`
 	// Legacy-only field: the reasoning field as the legacy catalog spells it.
 	Interleaved *capabilityModelInterleaved `json:"interleaved"`
-	// v2-only fields.
-	Type         string                             `json:"type"`
-	Capabilities *capabilityModelCapabilities       `json:"capabilities"`
-	// The map holds pointers so an accessor can return the entry it selected. Go does not
-	// allow taking the address of a map value, and encoding/json allocates each pointer on
-	// decode, so the only cost is one allocation per lane.
+	// v2-only fields. A standalone comment ends a gofmt alignment run, so these four
+	// fields must stay together for their columns to line up.
+	//
+	// API holds pointers so an accessor can return the entry it selected: Go does not allow
+	// taking the address of a map value, and encoding/json allocates each pointer on decode.
+	Type         string                              `json:"type"`
+	Capabilities *capabilityModelCapabilities        `json:"capabilities"`
 	API          map[string]*capabilityModelAPIEntry `json:"api"`
-	Cost         json.RawMessage                    `json:"cost"`
+	Cost         json.RawMessage                     `json:"cost"`
 }
 
 type capabilityModelModalities struct {
