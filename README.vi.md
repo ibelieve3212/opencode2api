@@ -78,7 +78,7 @@ Thư mục cấu hình phải ghi được để thực hiện việc chuyển m
 
 ## Docker
 
-Image được phát hành là `ghcr.io/ibelieve3212/opencode2api`.
+Image được phát hành là `ghcr.io/ibelieve3212/oc2api`.
 
 ```bash
 cp config.example.json config.json

@@ -31,6 +31,7 @@ jobs:
         shell: bash
         env:
           DISPATCH_TAG: ${{ inputs.tag }}
+          IMAGE_OWNER: ${{ github.repository_owner }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
             release_tag="$DISPATCH_TAG"
@@ -42,7 +43,10 @@ jobs:
             exit 1
           fi
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
-          echo "image_name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          # A package name the registry accepts. GITHUB_REPOSITORY would give opencode2api, and a
+# package by that name under this account refuses this repository with write_package, while
+# a fresh name in the same job pushes normally.
+          echo "image_name=ghcr.io/${IMAGE_OWNER}/oc2api" >> "$GITHUB_OUTPUT"
 
   verify:
     name: Verify source

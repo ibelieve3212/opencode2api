@@ -78,7 +78,7 @@ Windows 下使用 `Copy-Item config.example.json config.json` 复制配置，执
 
 ## Docker 部署
 
-已发布镜像：`ghcr.io/ibelieve3212/opencode2api`。
+已发布镜像：`ghcr.io/ibelieve3212/oc2api`。
 
 ```bash
 cp config.example.json config.json

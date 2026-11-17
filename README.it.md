@@ -76,7 +76,7 @@ La directory di configurazione deve essere scrivibile per migrare la password, s
 
 ## Docker
 
-L'immagine pubblicata è `ghcr.io/ibelieve3212/opencode2api`.
+L'immagine pubblicata è `ghcr.io/ibelieve3212/oc2api`.
 
 ```bash
 cp config.example.json config.json
