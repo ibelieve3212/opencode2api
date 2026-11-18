@@ -78,10 +78,19 @@ func DeriveRequestIDs(r *http.Request, body map[string]any, scope string) Reques
 	}
 	projectSignal := jsonutil.FirstString(r.Header.Get("x-opencode-project"), jsonutil.StringAt(body, "metadata", "project_id"))
 	if projectSignal == "" {
-		// A fresh project id per request. The free tier ledges its quota per
-		// project id and egress, so one shared id is one shared bucket: the old
-		// per-caller default arrived pre-burned on popular exits. A client that
+		// A fresh project id per request, matching what a capture of the official
+		// client and the verified reference implementation both do. A client that
 		// names its project keeps that name.
+		//
+		// This used to claim the free tier ledges quota per project id and egress.
+		// Measured on 2026-11-18: twelve requests, each with a different random
+		// project id, were all answered with Retry-After against the same already
+		// spent window. A fresh project id therefore does not reach a fresh
+		// allowance — do not build on that idea.
+		//
+		// What the window is keyed on is still open. Every spent egress answers the
+		// same 00:00 UTC daily boundary, so equal Retry-After values cannot tell a
+		// per-/64 bucket from a per-/48 one; they only show the reset is global.
 		projectSignal = RandomProjectID()
 	}
 	parentSession := jsonutil.FirstString(
