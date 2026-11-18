@@ -58,9 +58,14 @@ const opencodeSkills = `Skills provide specialized instructions and workflows fo
 Use the skill tool to load a skill when a task matches its description.
 <available_skills>
   <skill>
-    <name>customize-opencode</name>
-    <description>Use ONLY when the user is editing or creating opencode's own configuration: opencode.json, opencode.jsonc, files under .opencode/, or files under ~/.config/opencode/. Also use when creating or fixing opencode agents, subagents, skills, plugins, MCP servers, or permission rules. Do not use for the user's own application code, or for any project that is not configuring opencode itself.</description>
-    <location>&lt;built-in&gt;</location>
+    <id>opencode</id>
+    <name>OpenCode</name>
+    <description>Use this skill for any question about OpenCode itself, including how OpenCode works, using or configuring it, migrating from V1 to V2, troubleshooting it, developing plugins or integrations, using the OpenCode SDK, clients, server, or API, and contributing to the OpenCode codebase. Also use it for OpenCode agents, commands, skills, tools, permissions, MCP servers, providers, models, themes, keybinds, formatters, the CLI, TUI, desktop app, and web app.</description>
+  </skill>
+  <skill>
+    <id>report</id>
+    <name>Report</name>
+    <description>Use when the user wants to report an opencode issue or bug. Collect standard diagnostics, add user-specific reproduction context, and publish the issue with GitHub CLI.</description>
   </skill>
 </available_skills>`
 
