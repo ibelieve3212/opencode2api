@@ -5,11 +5,11 @@ package httpx
 // (the version number itself is not validated), so this only needs bumping
 // when it starts rejecting older ones.
 //
-// Ground truth for the installed client: the release binary is compiled with
-// `--user-agent=opencode/latest/2.3.0/cli`, which is what every outbound request
-// from opencode 2.3.0 carries. Keep this in step with a client you can inspect —
-// read it out of the binary rather than guessing.
-const v2ClientVersion = "2.3.0"
+// Ground truth for the installed client: a capture of the 2.3.1 release shows
+// every outbound request carrying `opencode/latest/2.3.1/cli`. Keep this in
+// step with a client you can inspect — read it out of a capture rather than
+// guessing.
+const v2ClientVersion = "2.3.1"
 
 // v1ClientVersion is the OpenCode 1.x release the gateway claims to be on the
 // v1 lane (/zen), and v1BunVersion is the Bun runtime that release ships with.
