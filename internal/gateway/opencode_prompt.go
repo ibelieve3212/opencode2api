@@ -180,24 +180,36 @@ func opencodeSystemPrompt(model string, v1 bool, tools []string, environment *co
 const opencodeWorktreeGuidance = "When you create a worktree outside the current working directory and intend to use it as your primary working directory, consider using `execute` to call `tools.opencode.session_move` and make the worktree the session's working directory."
 
 // opencodeToolNames lists the tool names a shaped Chat payload declares, so the base
-// prompt renders guidance for exactly the tools the request carries. A payload that
-// declares none falls back to the official set for the lane, which shaping always
-// appends.
+// prompt renders guidance for exactly the tools the request carries.
+//
+// The official set is always included, because renameAndCompleteTools appends it
+// unconditionally after this runs. Rendering from the caller's names alone gave the wrong
+// answer for every foreign agent: a client that declares run_command, write_file and
+// apply_patch instead of shell, write and edit matched none of the three guidance lines, so
+// the injected prompt carried an empty ${OPENCODE_TOOL_GUIDANCE} while the tool set it was
+// sent beside declared all three. The section a real CLI always fills was silently blank.
 func opencodeToolNames(payload map[string]any, v1 bool) []string {
 	items, _ := payload["tools"].([]any)
-	names := make([]string, 0, len(items))
+	names := make([]string, 0, len(items)+len(officialToolNames(v1)))
+	seen := make(map[string]bool, len(items)+len(officialToolNames(v1)))
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	for _, name := range officialToolNames(v1) {
+		add(name)
+	}
 	for _, item := range items {
 		// A Chat tool is {"type":"function","function":{"name":…}}, which is the shape
 		// setToolName writes and the shape readToolName reads.
 		entry, _ := item.(map[string]any)
 		function, _ := entry["function"].(map[string]any)
 		name, _ := function["name"].(string)
-		if name = strings.TrimSpace(name); name != "" {
-			names = append(names, name)
-		}
-	}
-	if len(names) == 0 {
-		return officialToolNames(v1)
+		add(name)
 	}
 	return names
 }

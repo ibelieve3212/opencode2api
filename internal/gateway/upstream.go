@@ -762,16 +762,25 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool, environm
 // chat body, so the free tier always sees the same ceiling.
 const v2CompletionLimit = 32000
 
-// ensureV2CompletionLimit adds the client's own max_completion_tokens when the
-// caller did not ask for a ceiling. A caller-supplied max_tokens or
-// max_completion_tokens wins, so an explicit limit is still honoured. It
-// reports whether the payload changed.
+// ensureV2CompletionLimit normalizes the ceiling to the field a 2.x client uses
+// and fills in its own value when the caller asked for none.
+//
+// The client only ever writes max_completion_tokens; max_tokens is the 1.x and
+// third-party spelling. Forwarding a caller's max_tokens unchanged put a field on
+// the wire that no request from this lane's client contains, so a caller-supplied
+// ceiling is moved to max_completion_tokens and then left alone: an explicit limit
+// still wins over v2CompletionLimit. It reports whether the payload changed.
 func ensureV2CompletionLimit(payload map[string]any) bool {
-	if _, ok := payload["max_completion_tokens"]; ok {
-		return false
+	changed := false
+	if _, ok := payload["max_completion_tokens"]; !ok {
+		if ceiling, ok := payload["max_tokens"]; ok {
+			payload["max_completion_tokens"] = ceiling
+			delete(payload, "max_tokens")
+			changed = true
+		}
 	}
-	if _, ok := payload["max_tokens"]; ok {
-		return false
+	if _, ok := payload["max_completion_tokens"]; ok {
+		return changed
 	}
 	payload["max_completion_tokens"] = v2CompletionLimit
 	return true
