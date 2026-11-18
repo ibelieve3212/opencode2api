@@ -494,18 +494,20 @@ var bunCommonHeaders = []string{
 	"User-Agent",
 }
 
-// bunRequestHead renders the request line and headers of req the way Bun's
-// fetch writes them for body (nil when the request has none):
-//  1. the headers of bunCommonHeaders, in that order and spelling;
-//  2. every other header, lowercased as both OpenCode clients hand them to
-//     fetch, and sorted as the 1.x AI SDK passes them;
-//  3. the headers fetch adds itself: Connection, then User-Agent and Accept
-//     unless the caller set them, Host, Accept-Encoding unless the caller set
-//     it, and Content-Length when there is a body.
+// bunRequestHead renders the request line and headers of req the way an official
+// OpenCode client writes them for body (nil when the request has none):
+//  1. the headers of bunCommonHeaders, in that order, lowercased;
+//  2. every other header, lowercased, sorted;
+//  3. connection, accept, host, accept-encoding, and content-length last.
 //
-// An Accept of "*/*" is written where fetch adds its default, since that is
-// where the official clients' Accept appears. Host, Connection,
-// Content-Length and Transfer-Encoding belong to the transport, so caller
+// A 2.3.1 capture shows exactly that order — authorization, content-type,
+// user-agent, b3, traceparent, x-opencode-client, x-opencode-project,
+// x-opencode-session, x-opencode-session-id, x-session-affinity, x-session-id,
+// connection, accept, host, accept-encoding, content-length — with lowercase
+// names throughout. net/http canonicalises the spelling and reorders, which is
+// why the bytes are written here instead of delegating to it.
+//
+// Host, Connection, Content-Length and Transfer-Encoding belong to the transport, so caller
 // values for them are ignored. decompress reports whether the transport added
 // Accept-Encoding and so decodes the response.
 func bunRequestHead(req *http.Request, body []byte) ([]byte, bool, error) {
@@ -526,11 +528,8 @@ func bunRequestHead(req *http.Request, body []byte) ([]byte, bool, error) {
 		}
 		values[lower] = value
 	}
-	if values["accept"] == "*/*" {
-		delete(values, "accept")
-	}
 	_, hasUserAgent := values["user-agent"]
-	_, hasAccept := values["accept"]
+	acceptValue, hasAccept := values["accept"]
 	_, hasEncoding := values["accept-encoding"]
 	method := req.Method
 	if method == "" {
@@ -538,32 +537,32 @@ func bunRequestHead(req *http.Request, body []byte) ([]byte, bool, error) {
 	}
 	var head strings.Builder
 	head.WriteString(method + " " + req.URL.RequestURI() + " HTTP/1.1\r\n")
-	// fetch computes Content-Length itself when it has a body, so it appears in
-	// the common-header block instead of trailing the request. Header order is
-	// part of what a fingerprint sees, so it belongs where the runtime puts it.
-	wroteLength := false
+	// Header names go out lowercase and Content-Length trails the request, because that is
+	// exactly what the official client puts on the wire (captured from 2.3.1: authorization,
+	// content-type, user-agent, b3, traceparent, x-opencode-*, connection, accept, host,
+	// accept-encoding, content-length). Header order and spelling are part of the request
+	// shape, so they belong where the client puts them.
 	for _, name := range bunCommonHeaders {
 		lower := strings.ToLower(name)
-		if lower == "content-length" && body != nil {
-			head.WriteString(name + ": " + strconv.Itoa(len(body)) + "\r\n")
-			delete(values, lower)
-			wroteLength = true
+		if lower == "content-length" {
 			continue
 		}
 		if value, ok := values[lower]; ok {
-			head.WriteString(name + ": " + value + "\r\n")
+			head.WriteString(lower + ": " + value + "\r\n")
 			delete(values, lower)
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(values)) {
 		head.WriteString(name + ": " + values[name] + "\r\n")
 	}
-	head.WriteString("Connection: keep-alive\r\n")
+	head.WriteString("connection: keep-alive\r\n")
 	if !hasUserAgent {
-		head.WriteString("User-Agent: Bun/" + v1BunVersion + "\r\n")
+		head.WriteString("user-agent: Bun/" + v1BunVersion + "\r\n")
 	}
-	if !hasAccept {
-		head.WriteString("Accept: */*\r\n")
+	if hasAccept {
+		head.WriteString("accept: " + acceptValue + "\r\n")
+	} else {
+		head.WriteString("accept: */*\r\n")
 	}
 	// fetch takes Host from the parsed URL, which omits a default port.
 	host := req.Host
@@ -575,12 +574,12 @@ func bunRequestHead(req *http.Request, body []byte) ([]byte, bool, error) {
 	} else {
 		host = strings.TrimSuffix(host, ":80")
 	}
-	head.WriteString("Host: " + host + "\r\n")
+	head.WriteString("host: " + host + "\r\n")
 	if !hasEncoding {
-		head.WriteString("Accept-Encoding: gzip, deflate, br, zstd\r\n")
+		head.WriteString("accept-encoding: gzip, deflate, br, zstd\r\n")
 	}
-	if body != nil && !wroteLength {
-		head.WriteString("Content-Length: " + strconv.Itoa(len(body)) + "\r\n")
+	if body != nil {
+		head.WriteString("content-length: " + strconv.Itoa(len(body)) + "\r\n")
 	}
 	head.WriteString("\r\n")
 	return []byte(head.String()), !hasEncoding, nil

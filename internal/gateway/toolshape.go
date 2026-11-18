@@ -33,11 +33,13 @@ type opencodeToolDefinition struct {
 }
 
 // v2OfficialToolOrder is the key order of opencode_tools.json, made explicit
-// because Go maps do not preserve it. Tool order is not validated upstream, but
-// keeping the captured order makes the wire body stable.
+// because Go maps do not preserve it. The order and the set come from a 2.3.1
+// capture: 2.3.1 carries experimental_image_generate and no longer carries
+// patch, which an earlier 2.3.0 build still did.
 var v2OfficialToolOrder = []string{
-	"edit", "execute", "glob", "grep", "question", "read", "shell",
-	"skill", "subagent", "webfetch", "websearch", "write", "patch",
+	"edit", "execute", "experimental_image_generate", "glob", "grep",
+	"question", "read", "shell", "skill", "subagent", "webfetch",
+	"websearch", "write",
 }
 
 var (

@@ -25,6 +25,14 @@ var opencodePromptV1 string
 //go:embed opencode_prompt_v2.txt
 var opencodePromptV2 string
 
+// opencodePromptCodeMode is the "# Code Mode" block a 2.3.x client appends after the
+// identity block: the section that introduces the `execute` tool and lists the built-in
+// `opencode` namespace it can reach. Without it the prompt describes fewer capabilities
+// than the tool set declares, because `execute` is in that set.
+//
+//go:embed opencode_prompt_v2_codemode.txt
+var opencodePromptCodeMode string
+
 // opencodePromptMarkers identify a body that already carries an official CLI system prompt,
 // so a client that sends one itself is left alone and repeated shaping cannot duplicate it.
 //
@@ -144,14 +152,21 @@ func opencodeSystemPrompt(model string, v1 bool, tools []string, environment *co
 	if v1 {
 		base = renderBasePrompt(opencodePromptV1, tools)
 	}
-	return strings.Join([]string{
-		base,
-		identityBlock(model),
-		"Today's date: " + time.Now().UTC().Format("Mon Jan 02 2006"),
+	parts := []string{base, identityBlock(model)}
+	// The order below is the order a 2.3.1 capture shows, which is not the order the
+	// parts are written in the binary: the base prompt and identity first, then the
+	// Code Mode block, then the skill listing, then the date, the environment block and
+	// the worktree guidance. 1.x has no Code Mode, so that part is v2-only.
+	if !v1 {
+		parts = append(parts, strings.TrimRight(opencodePromptCodeMode, "\n"))
+	}
+	parts = append(parts,
+		opencodeSkills,
+		"Today's date: "+time.Now().UTC().Format("Mon Jan 02 2006"),
 		opencodeEnvironment(model, environment),
 		opencodeWorktreeGuidance,
-		opencodeSkills,
-	}, "\n")
+	)
+	return strings.Join(parts, "\n")
 }
 
 // opencodeWorktreeGuidance is the system part the tools plugin pushes onto the array
