@@ -417,21 +417,28 @@ func (p *anonymousNodes) RestoreProxy(proxy *proxyTransport) int {
 	return cleared
 }
 
-// maxAnonymousRetryAfterMultiplier bounds an upstream Retry-After on the
-// anonymous lane to the same 8x ceiling as its exponential backoff. The lane
-// is rate limited per exit IP, and a cooling node is reached only through the
-// cursor's fallback: after every eligible node, and not at all while #pool
-// transports are present, since the cursor then keeps cycling those. A quota
-// response asking for hours would keep the exit demoted long after a network
-// change gave it a fresh allowance. Key lanes keep honoring Retry-After in
-// full.
-const maxAnonymousRetryAfterMultiplier = 8
+// anonymousBackoffDoublings caps the hint-less backoff at 8x the base cooldown
+// (1 << 3). A node that answers with a Retry-After is cooled for that value in
+// full instead; see MarkFailure.
+//
+// A quota response is measured in hours, not seconds: a spent free-tier egress
+// answers with Retry-After around 79000 seconds (22 hours), measured on a pinned
+// exit across four models, and that is the window the upstream really enforces.
+// This constant used to cap the hint at 8x the base cooldown, so an exit was
+// retried minutes after being told to wait most of a day, and every retry budget
+// was spent re-hitting a spent exit — which is what a foreign client like ccLoad
+// kept walking into.
+//
+// Key lanes have always honored the full value. #pool entries are still never
+// cooled: the proxy picks their upstream egress per connection, so cooling the
+// proxy would retire the whole pool over one spent /64 that the next connection
+// would not have reused anyway.
+const anonymousBackoffDoublings = 3
 
 // MarkFailure cools node down after an error or a 401, 403, 429 or 5xx
 // response; any other response leaves it untouched, and #pool nodes are never
-// cooled. The cooldown doubles with each consecutive failure, from the
-// base cooldown up to 8x, and a longer Retry-After extends it up to that same
-// 8x ceiling.
+// cooled. Without a Retry-After the cooldown doubles with each consecutive
+// failure, from the base cooldown up to 8x; a Retry-After is honored in full.
 func (p *anonymousNodes) MarkFailure(node *anonymousNode, resp *http.Response, err error) {
 	if node == nil || (node.proxy != nil && node.proxy.pool) {
 		return
@@ -440,10 +447,10 @@ func (p *anonymousNodes) MarkFailure(node *anonymousNode, resp *http.Response, e
 		return
 	}
 	failures := node.failures.Add(1)
-	delay := p.cooldown * time.Duration(1<<min(failures-1, 3))
+	delay := p.cooldown * time.Duration(1<<min(failures-1, anonymousBackoffDoublings))
 	if resp != nil {
 		if retryAfter := retryAfterHint(resp.Header); retryAfter > delay {
-			delay = min(retryAfter, p.cooldown*maxAnonymousRetryAfterMultiplier)
+			delay = retryAfter
 		}
 	}
 	node.cooldownUntil.Store(time.Now().Add(delay).UnixNano())
@@ -954,7 +961,7 @@ func (p *upstreamNodes) MarkFailure(node *upstreamNode, resp *http.Response, err
 		return
 	}
 	failures := node.failures.Add(1)
-	multiplier := time.Duration(1 << min(failures-1, 3))
+	multiplier := time.Duration(1 << min(failures-1, anonymousBackoffDoublings))
 	delay := p.cooldown * multiplier
 	if resp != nil {
 		if retryAfter := retryAfterHint(resp.Header); retryAfter > delay {
