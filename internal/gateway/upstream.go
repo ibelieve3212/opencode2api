@@ -510,6 +510,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	maxOutput := g.catalog.MetadataForTier(route.ID, config.TierZen).MaxOutput
 	for i, baseURL := range upstreams {
 		preparedBodies[i], toolRenames[i] = prepareAnonymousBody(rawBody, protocol, models.IsV1Upstream(baseURL), g.cfg.Upstream.PromptEnvironment, maxOutput)
+		g.dumpShapedBody(ids, route, config.TierZen, preparedBodies[i])
 	}
 	for proxies < limit {
 		if ctx.Err() != nil {
@@ -931,6 +932,27 @@ func (g *Gateway) dumpOutboundBodies(route models.Route, bodies map[config.Tier]
 	}
 }
 
+// dumpShapedBody records the bytes this attempt actually sends, after free-tier shaping.
+// dumpOutboundBodies runs before shaping, so on its own it cannot answer the question shaping
+// exists to answer: what tool names and prompt did the model really see. Every 429 that looked
+// like a quota problem and turned out to be shape began with reading the pre-shaping body and
+// drawing the wrong conclusion.
+func (g *Gateway) dumpShapedBody(ids identity.RequestIDs, route models.Route, tier config.Tier, body []byte) {
+	if !g.cfg.Logging.DumpRequestBodies || len(body) == 0 {
+		return
+	}
+	sum := sha256.Sum256(body)
+	truncated := len(body) > requestBodyDumpLimit
+	payload := body
+	if truncated {
+		payload = body[:requestBodyDumpLimit]
+	}
+	g.logger.Debug("shaped upstream request body", "component", "upstream", "event", "upstream_request_body_shaped",
+		"request_id", ids.Request, "model", route.ID, "tier", tier, "protocol", route.ProtocolFor(tier),
+		"phase", "shaped", "bytes", len(body), "sha256", hex.EncodeToString(sum[:8]),
+		"truncated", truncated, "body", string(payload))
+}
+
 // shapeKeyBody normalizes key-tier free-model wire bodies to agent shape
 // (stream + official prompt + renamed and completed tools), mirroring the
 // anonymous lane; the tier's base URL decides between v1 and v2 shaping.
@@ -980,6 +1002,7 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 		return nil, fmt.Errorf("no prepared %s request body", override.Tier), 0
 	}
 	shaped, toolRenames, changed := g.shapeKeyBody(body, route, override.Tier)
+	g.dumpShapedBody(ids, route, override.Tier, shaped)
 	if changed {
 		body = shaped
 	}
@@ -1072,6 +1095,7 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 		return nil, fmt.Errorf("no prepared %s request body", route.Tier), 0
 	}
 	shaped, toolRenames, changed := g.shapeKeyBody(body, route, route.Tier)
+	g.dumpShapedBody(ids, route, route.Tier, shaped)
 	if changed {
 		body = shaped
 	}
