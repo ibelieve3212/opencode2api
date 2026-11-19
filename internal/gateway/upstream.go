@@ -507,8 +507,9 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	upstreams := g.anonymousUpstreams()
 	preparedBodies := make([][]byte, len(upstreams))
 	toolRenames := make([]*wire.ToolRenames, len(upstreams))
+	maxOutput := g.catalog.MetadataForTier(route.ID, config.TierZen).MaxOutput
 	for i, baseURL := range upstreams {
-		preparedBodies[i], toolRenames[i] = prepareAnonymousBody(rawBody, protocol, models.IsV1Upstream(baseURL), g.cfg.Upstream.PromptEnvironment)
+		preparedBodies[i], toolRenames[i] = prepareAnonymousBody(rawBody, protocol, models.IsV1Upstream(baseURL), g.cfg.Upstream.PromptEnvironment, maxOutput)
 	}
 	for proxies < limit {
 		if ctx.Err() != nil {
@@ -711,7 +712,7 @@ func (g *Gateway) inferenceClient(proxy *proxyTransport, baseURL, model string) 
 // (/zen) and v2 lanes. System One payloads are decision requests, not agent
 // traffic, so they are forwarded verbatim, as is a body that is not a JSON
 // object.
-func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool, environment *config.PromptEnvironmentConfig) ([]byte, *wire.ToolRenames) {
+func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool, environment *config.PromptEnvironmentConfig, maxOutput int) ([]byte, *wire.ToolRenames) {
 	if protocol == wire.SystemOne {
 		return body, nil
 	}
@@ -743,7 +744,7 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool, environm
 			changed = true
 		}
 	}
-	if !v1 && protocol == wire.Chat && ensureV2CompletionLimit(payload) {
+	if !v1 && protocol == wire.Chat && ensureV2CompletionLimit(payload, maxOutput) {
 		changed = true
 	}
 	if !changed {
@@ -758,9 +759,14 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool, environm
 	return encoded, renames
 }
 
-// v2CompletionLimit is the max_completion_tokens a 2.x client puts on every
-// chat body, so the free tier always sees the same ceiling.
-const v2CompletionLimit = 32000
+// v2CompletionLimitFallback is used only when the catalog does not know the
+// model's output ceiling.
+//
+// The client writes the model's own limit.output here, not a constant: a capture
+// of 2.3.2 shows beam-free at 131072, flint-40b-free at 65536 and
+// deepseek-v4.1-flash-free at 32000, each matching its catalog entry exactly. A
+// single hardcoded 32000 was right for one model and wrong for every other.
+const v2CompletionLimitFallback = 32000
 
 // ensureV2CompletionLimit normalizes the ceiling to the field a 2.x client uses
 // and fills in its own value when the caller asked for none.
@@ -770,7 +776,7 @@ const v2CompletionLimit = 32000
 // the wire that no request from this lane's client contains, so a caller-supplied
 // ceiling is moved to max_completion_tokens and then left alone: an explicit limit
 // still wins over v2CompletionLimit. It reports whether the payload changed.
-func ensureV2CompletionLimit(payload map[string]any) bool {
+func ensureV2CompletionLimit(payload map[string]any, maxOutput int) bool {
 	changed := false
 	if _, ok := payload["max_completion_tokens"]; !ok {
 		if ceiling, ok := payload["max_tokens"]; ok {
@@ -782,7 +788,10 @@ func ensureV2CompletionLimit(payload map[string]any) bool {
 	if _, ok := payload["max_completion_tokens"]; ok {
 		return changed
 	}
-	payload["max_completion_tokens"] = v2CompletionLimit
+	if maxOutput <= 0 {
+		maxOutput = v2CompletionLimitFallback
+	}
+	payload["max_completion_tokens"] = maxOutput
 	return true
 }
 
@@ -933,7 +942,7 @@ func (g *Gateway) shapeKeyBody(body []byte, route models.Route, tier config.Tier
 	if tier == config.TierGo {
 		baseURL = g.cfg.Upstream.Go
 	}
-	shaped, renames := prepareAnonymousBody(body, route.ProtocolFor(tier), models.IsV1Upstream(baseURL), g.cfg.Upstream.PromptEnvironment)
+	shaped, renames := prepareAnonymousBody(body, route.ProtocolFor(tier), models.IsV1Upstream(baseURL), g.cfg.Upstream.PromptEnvironment, g.catalog.MetadataForTier(route.ID, tier).MaxOutput)
 	return shaped, renames, !bytes.Equal(shaped, body)
 }
 

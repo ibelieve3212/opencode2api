@@ -76,7 +76,9 @@ func probePayload(model string, protocol wire.Protocol, effort string, v1 bool, 
 	if err != nil {
 		return nil, err
 	}
-	shaped, _ := prepareAnonymousBody(b, protocol, v1, environment)
+		// The probe states its own ceiling (max_tokens: 64), so the catalog value is
+	// only a fallback here and never reaches the wire.
+	shaped, _ := prepareAnonymousBody(b, protocol, v1, environment, 0)
 	return shaped, nil
 }
 
