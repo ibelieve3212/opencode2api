@@ -67,6 +67,7 @@ func toolRoutingBlock(disabled []string) string {
 		"- " + strings.Join(disabled, ", "),
 	}, "\n")
 }
+
 // opencodeSkills is the built-in skill listing the CLI appends after its
 // environment block. It is static, so it is part of the injected prompt.
 const opencodeSkills = `Skills provide specialized instructions and workflows for specific tasks.
