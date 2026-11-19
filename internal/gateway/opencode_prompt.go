@@ -52,6 +52,21 @@ var opencodePromptMarkers = []string{
 	"You are OpenCode,",
 }
 
+// toolRoutingBlock names the built-in tools this request carries but the client cannot dispatch.
+//
+// The official set is appended so the request matches a real CLI session, which means the model
+// can see names the caller never declared. A call it makes to one of those comes back to a client
+// that has no handler for it — the failure an agent shows as "unknown tool" on every tool turn.
+// Naming them here is cheaper and steadier than pruning the tool set and giving up the shape.
+func toolRoutingBlock(disabled []string) string {
+	return strings.Join([]string{
+		"# Tool routing",
+		"",
+		"Call only the tools declared in this request. These built-in names belong to the harness and are not available to you; do not call them even though they appear in the tool list:",
+		"",
+		"- " + strings.Join(disabled, ", "),
+	}, "\n")
+}
 // opencodeSkills is the built-in skill listing the CLI appends after its
 // environment block. It is static, so it is part of the injected prompt.
 const opencodeSkills = `Skills provide specialized instructions and workflows for specific tasks.
@@ -152,7 +167,7 @@ var opencodeTempDirectory = filepath.Join(os.TempDir(), "opencode")
 // and the openai-chat protocol module (chunk-a3k2v7ew.js) builds
 // `[{ role: "system", content: $U(system) }]`. An empty array emits no system message.
 // This was "\n\n" here until it was checked against the binary.
-func opencodeSystemPrompt(model string, v1 bool, tools []string, environment *config.PromptEnvironmentConfig) string {
+func opencodeSystemPrompt(model string, v1 bool, tools []string, environment *config.PromptEnvironmentConfig, disabled []string) string {
 	base := renderBasePrompt(opencodePromptV2, tools)
 	if v1 {
 		base = renderBasePrompt(opencodePromptV1, tools)
@@ -164,6 +179,9 @@ func opencodeSystemPrompt(model string, v1 bool, tools []string, environment *co
 	// the worktree guidance. 1.x has no Code Mode, so that part is v2-only.
 	if !v1 {
 		parts = append(parts, strings.TrimRight(opencodePromptCodeMode, "\n"))
+	}
+	if len(disabled) > 0 {
+		parts = append(parts, toolRoutingBlock(disabled))
 	}
 	parts = append(parts,
 		opencodeSkills,
@@ -267,12 +285,12 @@ func renderBasePrompt(prompt string, tools []string) string {
 // already carries the marker is left untouched, so repeated shaping cannot
 // duplicate the prompt. System One payloads are not chat bodies and are never
 // touched.
-func injectOfficialPrompt(payload map[string]any, protocol wire.Protocol, v1 bool, environment *config.PromptEnvironmentConfig) bool {
+func injectOfficialPrompt(payload map[string]any, protocol wire.Protocol, v1 bool, environment *config.PromptEnvironmentConfig, disabled []string) bool {
 	if payload == nil || protocol == wire.SystemOne {
 		return false
 	}
 	model, _ := payload["model"].(string)
-	prompt := opencodeSystemPrompt(model, v1, opencodeToolNames(payload, v1), environment)
+	prompt := opencodeSystemPrompt(model, v1, opencodeToolNames(payload, v1), environment, disabled)
 	switch protocol {
 	case wire.Chat:
 		return injectChatPrompt(payload, prompt)

@@ -729,9 +729,11 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool, environm
 	if ensureAnonymousChatUsage(payload, protocol) {
 		changed = true
 	}
-	if injectOfficialPrompt(payload, protocol, v1, environment) {
-		changed = true
-	}
+	// Tools are shaped first so the prompt can name the built-in tools this client has no
+	// counterpart for. Appending the official set is what makes the request look like a CLI
+	// session, but a client that never declared (say) an ask-the-user tool cannot answer a call
+	// to `question`; naming those in the prompt keeps the model off them instead of handing the
+	// client a tool call it cannot dispatch.
 	var renames *wire.ToolRenames
 	if !isTitle {
 		platform := ""
@@ -743,6 +745,9 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool, environm
 		if toolsChanged {
 			changed = true
 		}
+	}
+	if injectOfficialPrompt(payload, protocol, v1, environment, unaliasedOfficialTools(renames, v1)) {
+		changed = true
 	}
 	if !v1 && protocol == wire.Chat && ensureV2CompletionLimit(payload, maxOutput) {
 		changed = true

@@ -117,34 +117,84 @@ func officialToolNames(v1 bool) []string {
 }
 
 // OfficialToolCandidates returns client tool names equivalent to an official name.
+//
+// The list covers the naming families agents actually ship, not just one of them. It began
+// with the Claude-style Title-Case names only, which made the alias bind for one client and
+// fail for every other: a request declaring read_file, run_command and search_files matched no
+// candidate, so the official tools stayed unaliased, the model called read or shell, and the
+// client received a tool call it had never declared. That is the difference between an agent
+// that works through this gateway and one that errors on every tool turn.
+//
+// Matching is case-insensitive and shape-folded (see ToolRenames.Resolve), so a candidate only
+// needs to be spelled the way some client spells it.
 func OfficialToolCandidates(officialName string) []string {
 	switch strings.ToLower(officialName) {
 	case "bash", "shell":
-		return []string{"Bash"}
+		return []string{
+			"Bash", "Shell",
+			"shell", "run_command", "run_shell", "execute_command", "run_terminal_cmd",
+			"terminal", "exec", "command", "bash", "sh", "zsh",
+			// dsh names its command tool after the shell it runs.
+			"pwsh", "powershell", "cmd", "cmd_exe",
+		}
 	case "edit":
-		return []string{"Edit"}
+		return []string{
+			"Edit",
+			"edit", "edit_file", "str_replace", "replace_in_file", "modify_file",
+			"apply_patch", "patch_file",
+		}
 	case "glob":
-		return []string{"Glob"}
+		return []string{
+			"Glob",
+			"glob", "list_dir", "list_files", "list_directory", "find_files",
+			"search_files", "ls", "dir",
+		}
 	case "grep":
-		return []string{"Grep"}
+		return []string{
+			"Grep",
+			"grep", "search", "search_code", "code_search", "find_in_files",
+			"ripgrep", "rg",
+		}
 	case "question":
-		return []string{"AskUserQuestion"}
+		return []string{
+			"AskUserQuestion",
+			"question", "ask_user", "askuser", "ask", "user_input", "prompt_user",
+			// dsh spells it out; the fold does not bridge ask_user to ask_user_question.
+			"ask_user_question", "ask_human", "request_user_input",
+		}
 	case "read":
-		return []string{"Read"}
+		return []string{
+			"Read",
+			"read", "read_file", "readfile", "read_text_file", "view_file",
+			"open_file", "cat", "view",
+		}
 	case "skill":
-		return []string{"Skill"}
+		return []string{"Skill", "skill", "load_skill", "use_skill"}
 	case "subagent", "task":
-		return []string{"Agent", "Task", "Subagent"}
+		return []string{
+			"Agent", "Task", "Subagent",
+			"subagent", "task", "spawn_agent", "delegate", "run_agent", "agent",
+		}
 	case "todowrite":
-		return []string{"TodoWrite"}
+		return []string{"TodoWrite", "todo_write", "todo", "todos", "task_write", "update_todo"}
 	case "webfetch":
-		return []string{"WebFetch"}
+		return []string{
+			"WebFetch",
+			"webfetch", "web_fetch", "fetch_url", "fetch", "http_get", "browse", "url_fetch",
+		}
 	case "websearch":
-		return []string{"WebSearch"}
+		return []string{"WebSearch", "websearch", "web_search", "search_web", "google_search", "search_internet"}
 	case "write":
-		return []string{"Write"}
+		return []string{
+			"Write",
+			"write", "write_file", "writefile", "create_file", "save_file", "put_file",
+		}
 	case "patch":
-		return []string{"Patch"}
+		return []string{"Patch", "patch", "apply_patch", "diff_apply"}
+	case "execute":
+		return []string{"execute", "run_code", "code_execute", "eval", "python_exec", "javascript_exec"}
+	case "experimental_image_generate":
+		return []string{"generate_image", "image_generate", "create_image", "draw"}
 	default:
 		return nil
 	}
@@ -362,6 +412,25 @@ func bindOfficialToolAliases(renames *wire.ToolRenames, declaredNames, officialN
 	}
 }
 
+// unaliasedOfficialTools lists the official tools that were appended to the request but that no
+// client tool was bound to. The model can see them and may call them, yet the client never
+// declared anything by that name and cannot dispatch the call, so the prompt names them as
+// unavailable. A lane whose client already declares every counterpart gets an empty list and no
+// extra prompt text at all.
+func unaliasedOfficialTools(renames *wire.ToolRenames, v1 bool) []string {
+	official := officialToolNames(v1)
+	if renames == nil {
+		// No tools were shaped (a title request), so nothing was appended either.
+		return nil
+	}
+	var missing []string
+	for _, name := range official {
+		if _, bound := renames.Official(name); !bound {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
 func officialToolNameSet(v1 bool) map[string]bool {
 	set := make(map[string]bool)
 	for _, name := range officialToolNames(v1) {
