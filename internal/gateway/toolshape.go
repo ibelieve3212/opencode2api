@@ -252,6 +252,8 @@ func OfficialToolCandidates(officialName string) []string {
 			"fetch_webpage", "fetch_content", "get_url", "get_webpage", "url_fetch",
 			"open_url", "visit_url", "read_url", "retrieve_url", "browse_url",
 			"http_fetch", "load_url", "download_webpage", "web_get", "browse",
+			"visit_webpage", "browser_use", "browse_webpage", "goto_url", "web_scrape",
+			"scrape_url", "open_webpage", "read_webpage",
 		}
 	case "websearch":
 		return []string{
@@ -269,7 +271,8 @@ func OfficialToolCandidates(officialName string) []string {
 			"run_python", "python", "ipython", "repl", "interpreter", "code_interpreter",
 			"javascript_exec", "execute_javascript", "run_javascript", "node_exec",
 			"js_exec", "run_node", "execute_script", "run_script", "sandbox_exec",
-			"execute_ipython_cell", "execute_python_cell",
+			"python_interpreter", "python_repl", "execute_python_code", "run_python_code",
+			"generate_and_execute_code", "execute_ipython_cell", "execute_python_cell",
 			"notebook_execute",
 		}
 	case "experimental_image_generate":
