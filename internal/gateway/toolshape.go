@@ -116,88 +116,236 @@ func officialToolNames(v1 bool) []string {
 	return v2OfficialToolOrder
 }
 
-// OfficialToolCandidates returns client tool names equivalent to an official name.
+// OfficialToolCandidates returns every client spelling this gateway recognizes for one official
+// capability. The table covers the mainstream agent families field by field, because a gateway
+// that knows only one naming convention works for one client: a request declaring read_file,
+// run_command and search_files used to match nothing, so the built-ins stayed unbound, the model
+// called read or shell, and the client received a tool call it had never declared. That is the
+// difference between an agent that works through this gateway and one that errors on every tool
+// turn.
 //
-// The list covers the naming families agents actually ship, not just one of them. It began
-// with the Claude-style Title-Case names only, which made the alias bind for one client and
-// fail for every other: a request declaring read_file, run_command and search_files matched no
-// candidate, so the official tools stayed unaliased, the model called read or shell, and the
-// client received a tool call it had never declared. That is the difference between an agent
-// that works through this gateway and one that errors on every tool turn.
+// Provenance of each row, so the table stays maintainable instead of accreting guesses:
 //
-// Matching is case-insensitive and shape-folded (see ToolRenames.Resolve), so a candidate only
-// needs to be spelled the way some client spells it.
+//	Claude Code      Read Write Edit MultiEdit NotebookEdit Bash Glob Grep LS WebFetch WebSearch
+//	                 Task TodoWrite AskUserQuestion Skill
+//	Cursor           read_file edit_file run_terminal_cmd list_dir grep_search file_search
+//	                 codebase_search search_symbols reapply
+//	Cline/Roo/Kilo   read_file write_to_file replace_in_file execute_command list_files
+//	                 search_files ask_followup_question new_task insert_content search_and_replace
+//	Gemini/Qwen Code read_file write_file replace glob search_file_content list_directory
+//	                 read_many_files run_shell_command web_fetch google_web_search write_todos
+//	Codex            shell apply_patch update_plan web_search read_file view_image
+//	Zed              read_file edit_file create_file list_directory find_path grep run_command
+//	                 fetch web_search spawn_agent update_plan
+//	Goose            shell read_file write_file str_replace list_directory search web_fetch
+//	OpenHands        execute_bash execute_ipython_cell str_replace_editor browse finish
+//	SWE-agent        bash search_dir search_file find_file open edit create
+//	Crush            bash edit view write fetch glob grep ls
+//	Warp             run_command read_files edit_file search_codebase grep
+//	VS Code Copilot  read_file edit_file run_in_terminal list_dir file_search grep_search
+//	                 fetch_webpage semantic_search
+//	Amazon Q         fs_read fs_write execute_bash
+//	Devin            shell editor browse search fetch
+//	Amp              Bash Read Edit Write Glob Grep Task WebFetch WebSearch TodoWrite
+//	dsh              pwsh read read_image write edit glob grep web_fetch todo_write subagent
+//	                 skill ask_user_question
+//	pi               bash read write edit glob grep
+//
+// Matching is case-insensitive and shape-folded, so one row covers read_file, ReadFile and
+// read-file. A spelling two capabilities both claim is dropped by toolAliasIndex rather than
+// resolved by guessing.
 func OfficialToolCandidates(officialName string) []string {
-	switch strings.ToLower(officialName) {
-	case "bash", "shell":
+	switch capabilityOf(officialName) {
+	case "shell":
 		return []string{
-			"Bash", "Shell",
-			"shell", "run_command", "run_shell", "execute_command", "run_terminal_cmd",
-			"terminal", "exec", "command", "bash", "sh", "zsh",
+			// Claude Code, Amp, Crush, SWE-agent.
+			"Bash", "Shell", "bash", "shell", "sh", "zsh", "fish",
 			// dsh names its command tool after the shell it runs.
 			"pwsh", "powershell", "cmd", "cmd_exe",
-		}
-	case "edit":
-		return []string{
-			"Edit",
-			"edit", "edit_file", "str_replace", "replace_in_file", "modify_file",
-			"apply_patch", "patch_file",
-		}
-	case "glob":
-		return []string{
-			"Glob",
-			"glob", "list_dir", "list_files", "list_directory", "find_files",
-			"search_files", "ls", "dir",
-		}
-	case "grep":
-		return []string{
-			"Grep",
-			"grep", "search", "search_code", "code_search", "find_in_files",
-			"ripgrep", "rg",
-		}
-	case "question":
-		return []string{
-			"AskUserQuestion",
-			"question", "ask_user", "askuser", "ask", "user_input", "prompt_user",
-			// dsh spells it out; the fold does not bridge ask_user to ask_user_question.
-			"ask_user_question", "ask_human", "request_user_input",
+			// Cursor, Warp, Zed, VS Code Copilot.
+			"run_command", "run_terminal_cmd", "run_terminal_command", "run_in_terminal",
+			// Cline, Roo, Kilo, OpenHands, Amazon Q.
+			"execute_command", "execute_shell", "execute_bash", "execute_terminal_command",
+			// Gemini CLI, Qwen Code.
+			"run_shell_command", "run_shell", "run_bash", "run_cmd",
+			// Generic function-calling agents.
+			"command", "terminal", "exec", "exec_command", "shell_exec", "bash_exec",
+			"shell_command", "terminal_command", "system_command", "run_terminal",
+			"spawn_terminal", "open_terminal",
 		}
 	case "read":
 		return []string{
-			"Read",
-			"read", "read_file", "readfile", "read_text_file", "view_file",
-			"open_file", "cat", "view",
+			"Read", "read", "readfile", "read_file", "read_files", "read_many_files",
+			"read_multiple_files", "read_entire_file", "read_text_file", "read_file_content",
+			"read_lines", "read_document", "view", "view_file", "open", "open_file", "cat",
+			"file_read", "get_file", "get_file_contents", "get_file_content", "show_file",
+			"display_file", "print_file", "peek_file", "inspect_file",
+			// Amazon Q.
+			"fs_read",
 		}
-	case "skill":
-		return []string{"Skill", "skill", "load_skill", "use_skill"}
-	case "subagent", "task":
-		return []string{
-			"Agent", "Task", "Subagent",
-			"subagent", "task", "spawn_agent", "delegate", "run_agent", "agent",
-		}
-	case "todowrite":
-		return []string{"TodoWrite", "todo_write", "todo", "todos", "task_write", "update_todo"}
-	case "webfetch":
-		return []string{
-			"WebFetch",
-			"webfetch", "web_fetch", "fetch_url", "fetch", "http_get", "browse", "url_fetch",
-		}
-	case "websearch":
-		return []string{"WebSearch", "websearch", "web_search", "search_web", "google_search", "search_internet"}
 	case "write":
 		return []string{
-			"Write",
-			"write", "write_file", "writefile", "create_file", "save_file", "put_file",
+			"Write", "write", "writefile", "write_file", "write_files", "write_text_file",
+			"write_to_file", "create_file", "create_files", "create_new_file",
+			"create_or_update_file", "create", "save_file", "save_text_file", "put_file", "new_file",
+			"output_file", "file_write", "add_file", "emit_file",
+			// Amazon Q.
+			"fs_write",
 		}
-	case "patch":
-		return []string{"Patch", "patch", "apply_patch", "diff_apply"}
+	case "edit":
+		return []string{
+			"Edit", "edit", "editfile", "edit_file", "edit_files", "edit_lines",
+			"edit_file_content", "multiedit", "multi_edit", "str_replace", "string_replace",
+			"str_replace_editor", "replace_string", "replace_text", "replace_in_file",
+			"replace_in_file_content", "modify_file", "update_file", "change_file",
+			"apply_patch", "apply_diff", "apply_edit", "insert_content", "search_and_replace",
+			"replace",
+			"reapply", "refactor_file", "rewrite_file",
+		}
+	case "glob":
+		return []string{
+			"Glob", "glob", "glob_files", "list_dir", "listdir", "list_files",
+			"list_directory", "list_folder", "list_paths", "list_tree", "ls", "dir",
+			"find_files", "find_file", "find_path", "file_search", "directory_tree",
+			"dir_tree", "show_directory", "browse_directory", "scan_directory",
+			"enumerate_files", "directory_listing", "list_repository_files", "search_dir",
+		}
+	case "grep":
+		return []string{
+			"Grep", "grep", "rg", "ripgrep", "grep_search", "search", "search_code",
+			"code_search", "codebase_search", "search_codebase", "semantic_search",
+			"search_files", "search_file_content", "search_in_files", "search_repository",
+			"search_workspace", "search_text", "search_pattern",
+			"find_in_files", "find_string", "find_text", "find_all", "find_references",
+			"search_definitions",
+		}
+	case "question":
+		return []string{
+			"AskUserQuestion", "question", "ask", "askuser", "ask_user",
+			"ask_user_question", "ask_followup_question", "ask_human", "ask_user_input",
+			"ask_user_for_input", "ask_question", "prompt_user", "request_user_input",
+			"request_clarification", "user_input", "user_question", "clarify",
+		}
+	case "skill":
+		return []string{
+			"Skill", "skill", "skills", "load_skill", "use_skill", "get_skill",
+			"invoke_skill", "skill_load", "apply_skill", "read_skill",
+		}
+	case "subagent":
+		return []string{
+			"Agent", "Task", "Subagent", "subagent", "sub_agent", "task", "sub_task",
+			"subtask", "spawn_agent", "spawn_subagent", "delegate", "delegate_task",
+			"run_agent", "run_task", "invoke_agent", "dispatch_agent", "launch_agent",
+			"create_agent", "new_task", "agent_task", "parallel_agents",
+		}
+	case "todowrite":
+		return []string{
+			"TodoWrite", "TodoWriteList", "todo_write", "todowrite", "todo", "todos",
+			"todo_list", "todo_update", "update_todo", "update_todos", "write_todos",
+			"write_todo", "task_write", "task_list", "plan", "plans", "update_plan",
+			"create_plan", "edit_plan", "manage_todos", "set_todos", "track_tasks",
+			"checklist_write",
+		}
+	case "webfetch":
+		return []string{
+			"WebFetch", "webfetch", "web_fetch", "fetch", "fetch_url", "fetch_page",
+			"fetch_webpage", "fetch_content", "get_url", "get_webpage", "url_fetch",
+			"open_url", "visit_url", "read_url", "retrieve_url", "browse_url",
+			"http_fetch", "load_url", "download_webpage", "web_get", "browse",
+		}
+	case "websearch":
+		return []string{
+			"WebSearch", "websearch", "web_search", "search_web", "search_the_web",
+			"google_search", "google_web_search", "internet_search", "search_internet",
+			"online_search", "search_online", "web_query", "web_lookup", "search_engine",
+			// Search integrations MCP servers expose under their own product names.
+			"brave_search", "tavily_search", "exa_search", "serper_search",
+			"duckduckgo_search", "bing_search", "searxng_search", "kagi_search",
+		}
 	case "execute":
-		return []string{"execute", "run_code", "code_execute", "eval", "python_exec", "javascript_exec"}
+		return []string{
+			"execute", "run_code", "code_execute", "execute_code", "eval",
+			"evaluate_code", "python_exec", "python_execute", "execute_python",
+			"run_python", "python", "ipython", "repl", "interpreter", "code_interpreter",
+			"javascript_exec", "execute_javascript", "run_javascript", "node_exec",
+			"js_exec", "run_node", "execute_script", "run_script", "sandbox_exec",
+			"execute_ipython_cell", "execute_python_cell",
+			"notebook_execute",
+		}
 	case "experimental_image_generate":
-		return []string{"generate_image", "image_generate", "create_image", "draw"}
+		return []string{
+			"experimental_image_generate", "generate_image", "image_generate", "image_gen",
+			"create_image", "make_image", "draw", "draw_image", "generate_picture",
+			"render_image", "image_generation", "generate_visual", "picture_generate",
+		}
+
 	default:
 		return nil
 	}
+}
+
+// capabilityOf groups the official names that are one capability under a different CLI
+// generation. The 2.x line renamed bash to shell and task to subagent, so matching has to treat a
+// renamed pair as one thing or a client's bash cannot bind the 2.x shell.
+func capabilityOf(officialName string) string {
+	switch strings.ToLower(officialName) {
+	case "bash", "shell":
+		return "shell"
+	case "task", "subagent":
+		return "subagent"
+	default:
+		return strings.ToLower(officialName)
+	}
+}
+
+// allOfficialToolNames is the union of both lanes' official names, in a stable order.
+func allOfficialToolNames() []string {
+	seen := map[string]bool{}
+	all := make([]string, 0, 16)
+	for _, name := range append(append([]string{}, officialToolNames(false)...), officialToolNames(true)...) {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		all = append(all, name)
+	}
+	return all
+}
+
+// toolAliasIndex folds every recognized client spelling to the one capability that owns it.
+//
+// Two capabilities claiming one spelling would make the binding a coin flip, which is how
+// search_files once landed on glob for one agent and stayed opaque for another. Such a spelling is
+// dropped from the index instead: the client keeps its own wire name, which still dispatches to a
+// handler it actually has. An official name always means its own capability and outranks an alias.
+var toolAliasIndex = buildToolAliasIndex()
+
+func buildToolAliasIndex() map[string]string {
+	names := allOfficialToolNames()
+	index := make(map[string]string, 320)
+	reserved := make(map[string]bool, len(names))
+	for _, name := range names {
+		folded := foldToolForMatch(name)
+		index[folded] = capabilityOf(name)
+		reserved[folded] = true
+	}
+	conflicted := map[string]bool{}
+	for _, name := range names {
+		capability := capabilityOf(name)
+		for _, alias := range OfficialToolCandidates(name) {
+			folded := foldToolForMatch(alias)
+			if folded == "" || conflicted[folded] || reserved[folded] {
+				continue
+			}
+			if existing, taken := index[folded]; taken && existing != capability {
+				delete(index, folded)
+				conflicted[folded] = true
+				continue
+			}
+			index[folded] = capability
+		}
+	}
+	return index
 }
 
 // officialToolDefinition returns the captured definition for an official name.
@@ -268,16 +416,6 @@ func officialTool(protocol wire.Protocol, name string, v1 bool, platform string)
 			"parameters":  parameters,
 		}
 	}
-}
-
-// officialToolset renders the full official set for a lane.
-func officialToolset(protocol wire.Protocol, v1 bool, platform string) []any {
-	names := officialToolNames(v1)
-	tools := make([]any, 0, len(names))
-	for _, name := range names {
-		tools = append(tools, officialTool(protocol, name, v1, platform))
-	}
-	return tools
 }
 
 // v2ShellDescription renders the configured platform's shell description,
@@ -360,7 +498,39 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 			delete(payload, "functions")
 		}
 	}
-	shaped := make([]any, 0, len(items)+len(officialToolNames(v1)))
+	officialNames := officialToolNames(v1)
+	// A client tool that means the same thing as a built-in takes the built-in's name rather than an
+	// opaque one. Sending both is what broke agents: the request carried mcp_ab12cd34 plus the
+	// legible built-in read, the model reliably picked read, and the client got back a tool call it
+	// had never declared. One name per capability means the model has no wrong choice to make, and
+	// the response maps straight back to the client's own name.
+	standIn := make(map[string]string, len(officialNames))  // official name -> client tool standing in
+	byClient := make(map[string]string, len(declaredNames)) // client tool -> official name it takes
+	bind := func(accept func(official, declared string) bool) {
+		for _, official := range officialNames {
+			if _, done := standIn[official]; done {
+				continue
+			}
+			for _, declared := range declaredNames {
+				if _, taken := byClient[declared]; taken {
+					continue
+				}
+				if !accept(official, declared) {
+					continue
+				}
+				standIn[official] = declared
+				byClient[declared] = official
+				break
+			}
+		}
+	}
+	// A client's own spelling of a built-in outranks an alias, so a request declaring both read and
+	// read_file keeps read_file on its own name instead of taking the name read already holds.
+	bind(func(official, declared string) bool {
+		return foldToolForMatch(declared) == foldToolForMatch(official)
+	})
+	bind(toolNamesMatch)
+	shaped := make([]any, 0, len(items)+len(officialNames))
 	for _, item := range items {
 		entry, ok := item.(map[string]any)
 		if !ok {
@@ -372,19 +542,38 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 			shaped = append(shaped, item)
 			continue
 		}
+		if official, ok := byClient[name]; ok {
+			// The definition stays the client's — its schema is what its handler actually accepts —
+			// but the name the model sees is the built-in one.
+			setToolName(protocol, entry, official)
+			renames.Add(name, official)
+			renames.BindOfficial(official, name)
+			shaped = append(shaped, entry)
+			continue
+		}
 		if wireName := clientWireName(renames, used, name); wireName != name {
 			setToolName(protocol, entry, wireName)
 		}
 		shaped = append(shaped, entry)
 	}
-	shaped = append(shaped, officialToolset(protocol, v1, platform)...)
+	for _, official := range officialNames {
+		if _, covered := standIn[official]; covered {
+			continue
+		}
+		shaped = append(shaped, officialTool(protocol, official, v1, platform))
+	}
 	payload["tools"] = shaped
-	officialNames := officialToolNames(v1)
-	bindOfficialToolAliases(renames, declaredNames, officialNames)
 	declared := make(map[string]string, len(declaredNames))
 	for _, name := range declaredNames {
 		if wireName, ok := renames.Wire(name); ok {
 			declared[name] = wireName
+			continue
+		}
+		// A tool already spelled the built-in's way is not a rename, so the rename table has no
+		// entry for it. The history walk still needs the mapping: without it the call is treated as
+		// unknown and dropped, and a multi-step turn loses the tool it just ran.
+		if official, ok := byClient[name]; ok {
+			declared[name] = official
 		}
 	}
 	sanitizeToolHistory(payload, protocol, declared, renames, officialToolNameSet(v1))
@@ -392,24 +581,31 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 	return renames, true
 }
 
-func bindOfficialToolAliases(renames *wire.ToolRenames, declaredNames, officialNames []string) {
-	for _, official := range officialNames {
-		candidates := OfficialToolCandidates(official)
-		for _, declared := range declaredNames {
-			if _, exists := renames.Wire(declared); !exists {
-				continue
-			}
-			for _, candidate := range candidates {
-				if match, _ := renames.Resolve(candidate); match == declared {
-					renames.BindOfficial(official, declared)
-					break
-				}
-			}
-			if _, exists := renames.Official(official); exists {
-				break
-			}
+// toolNamesMatch reports whether a declared client tool names the same capability as an official
+// tool. The lookup goes through toolAliasIndex, which folds case, separators and punctuation, so
+// read_file, ReadFile and read-file all reach one row, and a spelling two capabilities claim maps
+// to neither rather than to whichever row happened to be checked first.
+func toolNamesMatch(official, declared string) bool {
+	folded := foldToolForMatch(declared)
+	if folded == "" {
+		return false
+	}
+	if folded == foldToolForMatch(official) {
+		return true
+	}
+	owner, ok := toolAliasIndex[folded]
+	return ok && owner == capabilityOf(official)
+}
+
+// foldToolForMatch lowercases a tool name and drops every character that is not a letter or digit.
+func foldToolForMatch(name string) string {
+	var builder strings.Builder
+	for _, char := range strings.ToLower(name) {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
+			builder.WriteRune(char)
 		}
 	}
+	return builder.String()
 }
 
 // unaliasedOfficialTools lists the official tools that were appended to the request but that no
