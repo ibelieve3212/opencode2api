@@ -209,3 +209,115 @@ func TestResponseBackfillsClientRequiredArguments(t *testing.T) {
 		t.Errorf("command = %v, want pwd", arguments["command"])
 	}
 }
+
+// v1SchemaTools 是 1.x 通道（/zen）的一组客户端工具：名字是 v1 官方的，参数是 dsh 的拼写。
+// v1 的 edit 用 filePath 而不是 v2 的 path，所以参数映射必须按各代的定义分别算。
+func v1SchemaTools() []any {
+	object := func(properties map[string]any, required ...string) map[string]any {
+		schema := map[string]any{"type": "object", "properties": properties}
+		if len(required) > 0 {
+			schema["required"] = required
+		}
+		return schema
+	}
+	text := func(description string) map[string]any {
+		return map[string]any{"type": "string", "description": description}
+	}
+	return []any{
+		map[string]any{"type": "function", "function": map[string]any{
+			"name":        "edit",
+			"description": "client edit",
+			"parameters": object(map[string]any{
+				"file_path":   text("File to edit"),
+				"old_string":  text("Text to find"),
+				"new_string":  text("Text to replace"),
+				"replace_all": map[string]any{"type": "boolean"},
+			}, "file_path", "old_string", "new_string"),
+		}},
+		map[string]any{"type": "function", "function": map[string]any{
+			"name":        "bash",
+			"description": "client bash",
+			"parameters": object(map[string]any{
+				"command":     text("Command"),
+				"timeoutMs":   map[string]any{"type": "integer"},
+				"description": text("What it does"),
+			}, "command", "description"),
+		}},
+		map[string]any{"type": "function", "function": map[string]any{
+			"name":        "read",
+			"description": "client read",
+			"parameters": object(map[string]any{
+				"file_path": text("File"),
+				"offset":    map[string]any{"type": "integer"},
+				"limit":     map[string]any{"type": "integer"},
+			}, "file_path"),
+		}},
+	}
+}
+
+// TestV1ShapedDefinitionIsTheOfficialOne 断言 1.x 通道发出的定义也是整块官方 v1 定义，
+// 参数映射按 v1 的 filePath 计算，而不是照搬 v2 的 path。
+func TestV1ShapedDefinitionIsTheOfficialOne(t *testing.T) {
+	payload := map[string]any{"tools": v1SchemaTools()}
+	if _, ok := renameAndCompleteTools(payload, protocol.Chat, true, ""); !ok {
+		t.Fatalf("shaping declined")
+	}
+	shaped := payload["tools"].([]any)
+	seen := map[string]bool{}
+	for _, raw := range shaped {
+		function := raw.(map[string]any)["function"].(map[string]any)
+		name := function["name"].(string)
+		definition, official := officialToolDefinition(name, true)
+		if !official {
+			continue
+		}
+		seen[name] = true
+		if function["description"] != definition.Description {
+			t.Errorf("%s: description is the client's, want the official v1 one", name)
+		}
+		if !reflect.DeepEqual(function["parameters"], definition.Parameters) {
+			t.Errorf("%s: parameters are the client's schema, want the official v1 one", name)
+		}
+	}
+	for _, name := range []string{"edit", "bash", "read"} {
+		if !seen[name] {
+			t.Errorf("%s did not take the official v1 definition", name)
+		}
+	}
+}
+
+// TestV1ToolArgumentRename 固定住 v1 的参数映射：filePath 对 file_path，而不是 v2 的 path。
+func TestV1ToolArgumentRename(t *testing.T) {
+	byName := map[string]any{}
+	for _, raw := range v1SchemaTools() {
+		function := raw.(map[string]any)["function"].(map[string]any)
+		byName[function["name"].(string)] = function["parameters"]
+	}
+	cases := map[string]map[string]string{
+		"edit": {"filePath": "file_path", "oldString": "old_string", "newString": "new_string", "replaceAll": "replace_all"},
+		"read": {"filePath": "file_path"},
+		"bash": {"timeout": "timeoutMs"},
+	}
+	for official, want := range cases {
+		got := toolArgumentRename(official, byName[official], true)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("v1 %s: got %v, want %v", official, got, want)
+		}
+	}
+}
+
+// TestV1BackfillCoversBashDescription 断言 v1 的 bash 也补齐客户端必填的 description。
+func TestV1BackfillCoversBashDescription(t *testing.T) {
+	payload := map[string]any{"tools": v1SchemaTools()}
+	renames, ok := renameAndCompleteTools(payload, protocol.Chat, true, "")
+	if !ok {
+		t.Fatalf("shaping declined")
+	}
+	values := renames.Required("bash")
+	if values == nil {
+		t.Fatalf("no backfill recorded for v1 bash")
+	}
+	if zero, present := values["description"]; !present || zero != "" {
+		t.Errorf("v1 bash backfill = %v, want description empty string", values)
+	}
+}
