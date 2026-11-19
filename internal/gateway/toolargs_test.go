@@ -55,7 +55,7 @@ func dshSchemaTools() []any {
 				"timeoutMs":         map[string]any{"type": "integer"},
 				"run_in_background": map[string]any{"type": "boolean"},
 				"description":       stringProperty("What the command does"),
-			}, "command"),
+			}, "command", "description"),
 		}},
 	}
 }
@@ -81,6 +81,8 @@ func TestShapedDefinitionIsTheOfficialOne(t *testing.T) {
 		if function["description"] != definition.Description {
 			t.Errorf("%s: description is the client's, want the official one", name)
 		}
+		// Byte for byte: the free tier refuses a definition that carries even one property
+		// the official one does not, so nothing client-specific may survive here.
 		if !reflect.DeepEqual(function["parameters"], definition.Parameters) {
 			t.Errorf("%s: parameters are the client's schema, want the official one", name)
 		}
@@ -163,5 +165,47 @@ func TestResponseRestoresClientArguments(t *testing.T) {
 	}
 	if !reflect.DeepEqual(arguments, want) {
 		t.Errorf("arguments = %v, want %v", arguments, want)
+	}
+}
+
+// TestResponseBackfillsClientRequiredArguments 断言客户端声明必填、但官方 schema 装不下的
+// 参数，会在响应侧补上零值。dsh 的 shell 要求 description，官方 shell 没有这个属性，模型
+// 不可能给出它 —— 不补，客户端就以 missing required property 拒掉整次调用。
+func TestResponseBackfillsClientRequiredArguments(t *testing.T) {
+	payload := map[string]any{"tools": dshSchemaTools()}
+	renames, ok := renameAndCompleteTools(payload, protocol.Chat, false, "")
+	if !ok {
+		t.Fatalf("shaping declined")
+	}
+	answer := []byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"pwd\"}"}}]}}]}`)
+	restored := protocol.RenameResponseTool(answer, protocol.Chat, renames)
+
+	var decoded struct {
+		Choices []struct {
+			Message struct {
+				ToolCalls []struct {
+					Function struct {
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(restored, &decoded); err != nil {
+		t.Fatalf("decode restored response: %v", err)
+	}
+	var arguments map[string]any
+	if err := json.Unmarshal([]byte(decoded.Choices[0].Message.ToolCalls[0].Function.Arguments), &arguments); err != nil {
+		t.Fatalf("decode arguments: %v", err)
+	}
+	description, present := arguments["description"]
+	if !present {
+		t.Fatalf("client-required description was not backfilled: %v", arguments)
+	}
+	if description != "" {
+		t.Errorf("description = %v, want the empty string", description)
+	}
+	if arguments["command"] != "pwd" {
+		t.Errorf("command = %v, want pwd", arguments["command"])
 	}
 }

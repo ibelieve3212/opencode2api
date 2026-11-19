@@ -343,6 +343,7 @@ type streamToolRenameState struct {
 	// client's. It is set once the wire name is known, and non-empty only when
 	// the two schemas spell an argument differently.
 	argMap      map[string]string
+	backfill    map[string]any
 	callIndex   any
 	choiceIndex any
 }
@@ -353,14 +354,18 @@ type streamToolRenameState struct {
 func settleArguments(state *streamToolRenameState) string {
 	raw := state.pendingArguments.String()
 	state.pendingArguments.Reset()
-	if len(state.argMap) == 0 || raw == "" {
+	if (len(state.argMap) == 0 && len(state.backfill) == 0) || raw == "" {
 		return raw
 	}
 	var object map[string]any
 	if err := json.Unmarshal([]byte(raw), &object); err != nil {
 		return raw
 	}
-	if !renameArgumentKeys(object, state.argMap) {
+	changed := renameArgumentKeys(object, state.argMap)
+	if backfillArguments(object, state.backfill) {
+		changed = true
+	}
+	if !changed {
 		return raw
 	}
 	encoded, err := json.Marshal(object)
@@ -444,10 +449,12 @@ func (renamer *streamToolRenamer) rewriteAnthropicFrame(raw string) ([]byte, boo
 		}
 		name, _ := block["name"].(string)
 		mapping := renamer.renames.Args(name)
+		backfill := renamer.renames.Required(name)
 		state := renamer.toolState(key)
 		state.argMap = mapping
+		state.backfill = backfill
 		state.pendingArguments.Reset()
-		if len(mapping) == 0 {
+		if len(mapping) == 0 && len(backfill) == 0 {
 			return nil, false
 		}
 		return RenameResponseTool([]byte(raw), Anthropic, renamer.renames), true
@@ -457,7 +464,7 @@ func (renamer *streamToolRenamer) rewriteAnthropicFrame(raw string) ([]byte, boo
 			return nil, false
 		}
 		state := renamer.tools[key]
-		if state == nil || len(state.argMap) == 0 {
+		if state == nil || (len(state.argMap) == 0 && len(state.backfill) == 0) {
 			return nil, false
 		}
 		if fragment, ok := delta["partial_json"].(string); ok {
@@ -471,7 +478,7 @@ func (renamer *streamToolRenamer) rewriteAnthropicFrame(raw string) ([]byte, boo
 		return encoded, true
 	case "content_block_stop":
 		state := renamer.tools[key]
-		if state == nil || len(state.argMap) == 0 || state.pendingArguments.Len() == 0 {
+		if state == nil || (len(state.argMap) == 0 && len(state.backfill) == 0) {
 			return nil, false
 		}
 		arguments := settleArguments(state)
@@ -545,7 +552,7 @@ func (renamer *streamToolRenamer) rewriteChatFrame(raw string) []byte {
 						state.decided = true
 					}
 				}
-				if state.decided && len(state.argMap) > 0 {
+				if state.decided && (len(state.argMap) > 0 || len(state.backfill) > 0) {
 					// The client's schema spells an argument differently from the
 					// official one, so the whole argument object has to be re-keyed,
 					// and a key can only be re-keyed once it is complete. Hold every
@@ -739,6 +746,7 @@ func (renamer *streamToolRenamer) applyNameFragment(state *streamToolRenameState
 		function["name"] = client
 		state.decided, state.renamed = true, true
 		state.argMap = renamer.renames.Args(state.pending)
+		state.backfill = renamer.renames.Required(state.pending)
 		return true
 	}
 	if renamer.renames.HasLongerPrefix(state.pending) {
@@ -754,6 +762,7 @@ func (renamer *streamToolRenamer) applyNameFragment(state *streamToolRenameState
 	function["name"] = client
 	state.decided, state.renamed = true, renamed
 	state.argMap = renamer.renames.Args(state.pending)
+	state.backfill = renamer.renames.Required(state.pending)
 	return true
 }
 

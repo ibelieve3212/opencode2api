@@ -40,6 +40,11 @@ type ToolRenames struct {
 	// in the official schema; the client's handler only accepts the argument
 	// names it declared. A tool whose schemas already agree has no entry.
 	args map[string]map[string]string
+	// required maps a wire tool name to the client arguments that tool's handler
+	// declares required but the official schema does not carry. The model answers
+	// in the official schema, so it cannot supply them; the response walk adds
+	// them with a zero value so the client's own validation accepts the call.
+	required map[string]map[string]any
 	// byCase and byShape map a folded client name back to the one declared
 	// client tool it names. A value of "" marks a fold two tools share: that
 	// name is never guessed between.
@@ -54,6 +59,7 @@ func NewToolRenames() *ToolRenames {
 		toClient: map[string]string{},
 		official: map[string]string{},
 		args:     map[string]map[string]string{},
+		required: map[string]map[string]any{},
 		byCase:   map[string]string{},
 		byShape:  map[string]string{},
 	}
@@ -64,7 +70,7 @@ func NewToolRenames() *ToolRenames {
 // a declared tool bound to an official name still needs the response walk to
 // recognise the call, and an argument rename alone still needs applying.
 func (r *ToolRenames) Empty() bool {
-	return r == nil || (len(r.toWire) == 0 && len(r.official) == 0 && len(r.args) == 0)
+	return r == nil || (len(r.toWire) == 0 && len(r.official) == 0 && len(r.args) == 0 && len(r.required) == 0)
 }
 
 // BindArgs records how one wire tool's argument names map back to the client's
@@ -299,4 +305,24 @@ func ClientToolWireName(name string, used map[string]bool) string {
 			return candidate
 		}
 	}
+}
+
+// BindRequired records the client-required arguments one wire tool's official
+// schema cannot supply, with the zero value to send for each.
+func (r *ToolRenames) BindRequired(wire string, values map[string]any) {
+	if r == nil || wire == "" || len(values) == 0 {
+		return
+	}
+	if r.required == nil {
+		r.required = map[string]map[string]any{}
+	}
+	r.required[wire] = values
+}
+
+// Required returns the backfill values for one wire tool name.
+func (r *ToolRenames) Required(wire string) map[string]any {
+	if r == nil || wire == "" {
+		return nil
+	}
+	return r.required[wire]
 }

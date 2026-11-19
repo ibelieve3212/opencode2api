@@ -553,16 +553,14 @@ func RenameResponseTool(body []byte, protocol Protocol, renames *ToolRenames) []
 // "output" and a "response" envelope, and Anthropic tool_use blocks under
 // "content_block" or "content".
 func renameToolInMap(payload map[string]any, protocol Protocol, renames *ToolRenames) bool {
-	rename := func(container map[string]any, arguments func(map[string]any, map[string]string) bool) bool {
+	rename := func(container map[string]any, arguments func(map[string]any, string, *ToolRenames) bool) bool {
 		name, ok := container["name"].(string)
 		if !ok || name == "" {
 			return false
 		}
 		changed := false
-		if mapping := renames.Args(name); len(mapping) > 0 && arguments != nil {
-			if arguments(container, mapping) {
-				changed = true
-			}
+		if arguments != nil && arguments(container, name, renames) {
+			changed = true
 		}
 		if client, renamed := renames.Resolve(name); renamed {
 			container["name"] = client
@@ -653,7 +651,7 @@ func renameArgumentKeys(object map[string]any, mapping map[string]string) bool {
 
 // renameSerializedArguments rewrites the argument keys of one tool call whose
 // arguments travel as a JSON string, the shape Chat and Responses use.
-func renameSerializedArguments(container map[string]any, mapping map[string]string) bool {
+func renameSerializedArguments(container map[string]any, name string, renames *ToolRenames) bool {
 	raw, ok := container["arguments"].(string)
 	if !ok || raw == "" {
 		return false
@@ -662,7 +660,7 @@ func renameSerializedArguments(container map[string]any, mapping map[string]stri
 	if err := json.Unmarshal([]byte(raw), &object); err != nil {
 		return false
 	}
-	if !renameArgumentKeys(object, mapping) {
+	if !rekeyArguments(object, name, renames) {
 		return false
 	}
 	encoded, err := json.Marshal(object)
@@ -675,10 +673,38 @@ func renameSerializedArguments(container map[string]any, mapping map[string]stri
 
 // renameObjectArguments rewrites the argument keys of one tool call whose
 // arguments travel as a decoded object, the shape Anthropic uses.
-func renameObjectArguments(container map[string]any, mapping map[string]string) bool {
+func renameObjectArguments(container map[string]any, name string, renames *ToolRenames) bool {
 	object, ok := container["input"].(map[string]any)
 	if !ok {
 		return false
 	}
-	return renameArgumentKeys(object, mapping)
+	return rekeyArguments(object, name, renames)
+}
+
+// rekeyArguments applies one wire tool's argument rename and required backfill
+// to a decoded argument object.
+func rekeyArguments(object map[string]any, name string, renames *ToolRenames) bool {
+	changed := renameArgumentKeys(object, renames.Args(name))
+	if backfillArguments(object, renames.Required(name)) {
+		changed = true
+	}
+	return changed
+}
+
+// backfillArguments adds the client-required arguments the official schema could
+// not carry, so the client's own validation accepts a call the model answered in
+// the official schema.
+func backfillArguments(object map[string]any, values map[string]any) bool {
+	if len(values) == 0 {
+		return false
+	}
+	changed := false
+	for argument, zero := range values {
+		if _, present := object[argument]; present {
+			continue
+		}
+		object[argument] = zero
+		changed = true
+	}
+	return changed
 }

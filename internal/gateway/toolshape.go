@@ -552,10 +552,13 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 			// refusal is the same 429 the quota returns. The model therefore answers in the
 			// official schema, and the response walk re-keys the arguments back to the spellings
 			// the client's own handler accepts.
+			declaredParameters := declaredToolParameters(protocol, entry)
+			argumentRename := toolArgumentRename(official, declaredParameters, v1)
 			shaped = append(shaped, officialTool(protocol, official, v1, platform))
 			renames.Add(name, official)
 			renames.BindOfficial(official, name)
-			renames.BindArgs(official, toolArgumentRename(official, declaredToolParameters(protocol, entry), v1))
+			renames.BindArgs(official, argumentRename)
+			renames.BindRequired(official, toolRequiredBackfill(official, declaredParameters, v1, argumentRename))
 			continue
 		}
 		if wireName := clientWireName(renames, used, name); wireName != name {
@@ -1135,4 +1138,111 @@ func toolArgumentRename(official string, declared any, v1 bool) map[string]strin
 		return nil
 	}
 	return rename
+}
+
+// requiredNames reads a schema's required list. A payload that came through
+// encoding/json carries []any, but a schema built in Go may carry []string, and
+// both mean the same thing here.
+func requiredNames(value any) []string {
+	switch typed := value.(type) {
+	case []any:
+		names := make([]string, 0, len(typed))
+		for _, raw := range typed {
+			if name, ok := raw.(string); ok {
+				names = append(names, name)
+			}
+		}
+		return names
+	case []string:
+		return typed
+	default:
+		return nil
+	}
+}
+
+// cloneSchema deep-copies one decoded JSON schema so a per-request edit cannot
+// reach the shared embedded definition.
+func cloneSchema(schema map[string]any) map[string]any {
+	encoded, err := json.Marshal(schema)
+	if err != nil {
+		return schema
+	}
+	var clone map[string]any
+	if err := json.Unmarshal(encoded, &clone); err != nil {
+		return schema
+	}
+	return clone
+}
+
+// setEmittedToolParameters writes a parameters object back into a rendered tool
+// definition, in whichever place the protocol keeps it.
+func setEmittedToolParameters(protocol wire.Protocol, tool map[string]any, parameters map[string]any) {
+	switch protocol {
+	case wire.Chat:
+		if function, ok := tool["function"].(map[string]any); ok {
+			function["parameters"] = parameters
+		}
+	case wire.Anthropic:
+		tool["input_schema"] = parameters
+	default:
+		tool["parameters"] = parameters
+	}
+}
+
+// toolRequiredBackfill returns the client-required arguments the official schema
+// cannot carry, each with the zero value of its declared type. The official schema
+// has to go out byte for byte — adding a property to it is refused exactly like a
+// foreign tool name — so the model cannot supply these, and the client's own
+// validation would reject the call on arrival. The response walk adds them instead.
+func toolRequiredBackfill(official string, declared any, v1 bool, argumentRename map[string]string) map[string]any {
+	declaredSchema, _ := declared.(map[string]any)
+	if declaredSchema == nil {
+		return nil
+	}
+	declaredProperties := schemaProperties(declaredSchema)
+	required := requiredNames(declaredSchema["required"])
+	if len(declaredProperties) == 0 || len(required) == 0 {
+		return nil
+	}
+	definition, ok := officialToolDefinition(official, v1)
+	if !ok {
+		return nil
+	}
+	officialProperties := schemaProperties(definition.Parameters)
+	renamed := make(map[string]bool, len(argumentRename))
+	for _, client := range argumentRename {
+		renamed[client] = true
+	}
+	backfill := map[string]any{}
+	for _, argument := range required {
+		if argument == "" || renamed[argument] {
+			continue
+		}
+		if _, official := officialProperties[argument]; official {
+			continue
+		}
+		backfill[argument] = schemaZeroValue(declaredProperties[argument])
+	}
+	if len(backfill) == 0 {
+		return nil
+	}
+	return backfill
+}
+
+// schemaZeroValue returns the value to send for an argument the model could not
+// supply, chosen from the type the client declared for it.
+func schemaZeroValue(schema any) any {
+	object, _ := schema.(map[string]any)
+	switch object["type"] {
+	case "boolean":
+		return false
+	case "integer", "number":
+		return 0
+	case "array":
+		return []any{}
+	case "object":
+		return map[string]any{}
+	default:
+		return ""
+	}
 }
