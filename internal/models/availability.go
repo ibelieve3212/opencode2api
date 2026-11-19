@@ -257,10 +257,20 @@ func IsModelUnavailableReason(status int, body string) bool {
 	if status != 400 && status != 404 && status != 410 && status != 422 {
 		return false
 	}
+	// The body is lowercased, so markers are written flat. The upstream's own type name is
+	// "ModelDeprecated" — no underscore — and an earlier list held only "model_deprecated",
+	// so a 410 carrying the real body was never recognized:
+	//
+	//	{"type":"error","error":{"type":"ModelDeprecated","message":"Model glm-5.3-flash-free
+	//	 has been deprecated. Use deepseek-v4.1-flash-free instead."},
+	//	 "metadata":{"model":"glm-5.3-flash-free","replacement":"deepseek-v4.1-flash-free"}}
+	//
+	// Both the flat type name and the prose describe the same thing; either is authority.
 	text := strings.ToLower(body)
 	for _, marker := range []string{
 		"model_not_found", "model_not_available", "model_retired",
-		"model_deprecated", "unknown model", "model does not exist",
+		"model_deprecated", "modeldeprecated", "been deprecated",
+		"unknown model", "model does not exist",
 		"model has been retired", "model is no longer available",
 	} {
 		if strings.Contains(text, marker) {
