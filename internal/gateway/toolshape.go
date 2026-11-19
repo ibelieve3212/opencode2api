@@ -546,12 +546,16 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 			continue
 		}
 		if official, ok := byClient[name]; ok {
-			// The definition stays the client's — its schema is what its handler actually accepts —
-			// but the name the model sees is the built-in one.
-			setToolName(protocol, entry, official)
+			// The whole definition has to become the official one, not just the name. The free
+			// tier validates the argument schema too: a definition that carries another client's
+			// property spellings is refused exactly like one that carries its tool names, and the
+			// refusal is the same 429 the quota returns. The model therefore answers in the
+			// official schema, and the response walk re-keys the arguments back to the spellings
+			// the client's own handler accepts.
+			shaped = append(shaped, officialTool(protocol, official, v1, platform))
 			renames.Add(name, official)
 			renames.BindOfficial(official, name)
-			shaped = append(shaped, entry)
+			renames.BindArgs(official, toolArgumentRename(official, declaredToolParameters(protocol, entry), v1))
 			continue
 		}
 		if wireName := clientWireName(renames, used, name); wireName != name {
@@ -1029,4 +1033,106 @@ func rewriteToolReferences(payload map[string]any, protocol wire.Protocol, renam
 			}
 		}
 	}
+}
+
+// declaredToolParameters returns the parameters schema of one declared client
+// tool, in whichever shape the protocol puts it.
+func declaredToolParameters(protocol wire.Protocol, entry map[string]any) any {
+	switch protocol {
+	case wire.Chat:
+		if function, ok := entry["function"].(map[string]any); ok {
+			return function["parameters"]
+		}
+		return nil
+	case wire.Anthropic:
+		return entry["input_schema"]
+	default:
+		return entry["parameters"]
+	}
+}
+
+// officialArgAliases lists, per folded official argument name, the folded
+// client spellings that mean the same argument but do not fold together. The
+// fold already pairs oldString with old_string and replaceAll with replace_all,
+// so only genuinely different words need a row here.
+var officialArgAliases = map[string][]string{
+	"path":        {"filepath", "file", "filename", "targetfile", "absolutepath", "pathname", "target"},
+	"oldstring":   {"oldtext", "old", "search", "find", "original", "before"},
+	"newstring":   {"newtext", "new", "replace", "replacement", "after"},
+	"replaceall":  {"all", "global", "replaceevery"},
+	"content":     {"text", "filetext", "data", "body", "contents"},
+	"command":     {"cmd", "script", "shellcommand", "bash", "commandline"},
+	"workdir":     {"cwd", "workingdirectory", "dir", "directory"},
+	"timeout":     {"timeoutms", "timeoutseconds", "timeoutmillis", "maxtime"},
+	"background":  {"runinbackground", "async", "nohangup"},
+	"id":          {"name", "skill", "skillid"},
+	"pattern":     {"query", "regex", "glob", "searchpattern"},
+	"offset":      {"start", "from", "linenumber", "startline"},
+	"limit":       {"count", "maxlines", "lines", "max", "numlines"},
+	"description": {"justification", "reason", "note", "summary"},
+	"prompt":      {"task", "instruction", "instructions", "message"},
+	"agent":       {"subagent", "type", "kind"},
+}
+
+// schemaProperties returns the property table of one JSON schema, or nil when
+// the value is not an object schema with properties.
+func schemaProperties(schema any) map[string]any {
+	object, ok := schema.(map[string]any)
+	if !ok {
+		return nil
+	}
+	properties, _ := object["properties"].(map[string]any)
+	return properties
+}
+
+// toolArgumentRename maps the official property names of one tool onto the ones
+// the client declared for it. A pair is recorded only when the two spellings
+// differ, so a tool whose schemas already agree costs nothing.
+func toolArgumentRename(official string, declared any, v1 bool) map[string]string {
+	definition, ok := officialToolDefinition(official, v1)
+	if !ok {
+		return nil
+	}
+	officialProperties := schemaProperties(definition.Parameters)
+	declaredProperties := schemaProperties(declared)
+	if len(officialProperties) == 0 || len(declaredProperties) == 0 {
+		return nil
+	}
+	byFold := make(map[string]string, len(declaredProperties))
+	for name := range declaredProperties {
+		key := foldToolForMatch(name)
+		if key == "" {
+			continue
+		}
+		if existing, seen := byFold[key]; seen && existing != name {
+			// Two declared properties fold together: neither can be guessed for.
+			byFold[key] = ""
+			continue
+		}
+		byFold[key] = name
+	}
+	rename := map[string]string{}
+	for name := range officialProperties {
+		if _, same := declaredProperties[name]; same {
+			continue
+		}
+		folded := foldToolForMatch(name)
+		match := byFold[folded]
+		if match == "" {
+			for _, candidate := range officialArgAliases[folded] {
+				if client, hit := byFold[candidate]; hit && client != "" {
+					match = client
+					break
+				}
+			}
+		}
+		if match == "" || match == name {
+			continue
+		}
+		rename[name] = match
+	}
+	if len(rename) == 0 {
+		return nil
+	}
+	return rename
 }

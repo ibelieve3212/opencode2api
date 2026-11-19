@@ -1,0 +1,167 @@
+package gateway
+
+import (
+	"encoding/json"
+	"reflect"
+	"testing"
+
+	"github.com/ibelieve3212/opencode2api/internal/protocol"
+)
+
+// dshSchemaTools 是 dsh 真实声明的一组工具：名字是官方的，参数却是它自己的拼写。
+// 这正是被上游判成「非 OpenCode 会话」的那种定义——名字改对了，schema 还露馅。
+func dshSchemaTools() []any {
+	object := func(properties map[string]any, required ...string) map[string]any {
+		schema := map[string]any{
+			"type":                 "object",
+			"properties":           properties,
+			"additionalProperties": false,
+		}
+		if len(required) > 0 {
+			schema["required"] = required
+		}
+		return schema
+	}
+	stringProperty := func(description string) map[string]any {
+		return map[string]any{"type": "string", "description": description}
+	}
+	return []any{
+		map[string]any{"type": "function", "function": map[string]any{
+			"name":        "edit",
+			"description": "Edit an existing UTF-8 text file by replacing literal text.",
+			"parameters": object(map[string]any{
+				"file_path":           stringProperty("Path to edit"),
+				"old_string":          stringProperty("Literal text to replace"),
+				"new_string":          stringProperty("Literal replacement text"),
+				"replace_all":         map[string]any{"type": "boolean"},
+				"sandbox_permissions": stringProperty("Sandbox mode"),
+				"justification":       stringProperty("Why this edit needs access"),
+			}, "file_path", "old_string", "new_string"),
+		}},
+		map[string]any{"type": "function", "function": map[string]any{
+			"name":        "read",
+			"description": "Read a UTF-8 text file",
+			"parameters": object(map[string]any{
+				"file_path": stringProperty("File to read"),
+				"offset":    map[string]any{"type": "integer"},
+				"limit":     map[string]any{"type": "integer"},
+			}, "file_path"),
+		}},
+		map[string]any{"type": "function", "function": map[string]any{
+			"name":        "shell",
+			"description": "Run a PowerShell command",
+			"parameters": object(map[string]any{
+				"command":           stringProperty("Command to run"),
+				"timeoutMs":         map[string]any{"type": "integer"},
+				"run_in_background": map[string]any{"type": "boolean"},
+				"description":       stringProperty("What the command does"),
+			}, "command"),
+		}},
+	}
+}
+
+// TestShapedDefinitionIsTheOfficialOne 断言发出去的定义整块是官方的：名字、描述、
+// 参数 schema 全部一致。上游校验的就是这三样，留下任何一处客户端拼写都会被判成
+// 别的会话并以 429 拒绝。
+func TestShapedDefinitionIsTheOfficialOne(t *testing.T) {
+	payload := map[string]any{"tools": dshSchemaTools()}
+	if _, ok := renameAndCompleteTools(payload, protocol.Chat, false, ""); !ok {
+		t.Fatalf("shaping declined")
+	}
+	shaped := payload["tools"].([]any)
+	for _, raw := range shaped {
+		entry := raw.(map[string]any)
+		function := entry["function"].(map[string]any)
+		name := function["name"].(string)
+		definition, official := officialToolDefinition(name, false)
+		if !official {
+			// 客户端独有的工具仍走不透明名，不属于本条断言。
+			continue
+		}
+		if function["description"] != definition.Description {
+			t.Errorf("%s: description is the client's, want the official one", name)
+		}
+		if !reflect.DeepEqual(function["parameters"], definition.Parameters) {
+			t.Errorf("%s: parameters are the client's schema, want the official one", name)
+		}
+	}
+}
+
+// TestToolArgumentRename 固定住参数映射：官方拼写回到客户端拼写。
+func TestToolArgumentRename(t *testing.T) {
+	declared := dshSchemaTools()
+	byName := map[string]any{}
+	for _, raw := range declared {
+		entry := raw.(map[string]any)
+		function := entry["function"].(map[string]any)
+		byName[function["name"].(string)] = function["parameters"]
+	}
+	cases := map[string]map[string]string{
+		"edit":  {"path": "file_path", "oldString": "old_string", "newString": "new_string", "replaceAll": "replace_all"},
+		"read":  {"path": "file_path"},
+		"shell": {"timeout": "timeoutMs", "background": "run_in_background"},
+	}
+	for official, want := range cases {
+		got := toolArgumentRename(official, byName[official], false)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: got %v, want %v", official, got, want)
+		}
+	}
+}
+
+// TestToolArgumentRenameSkipsAgreeingSchemas 断言参数已经一致的工具不产生映射，
+// 这样响应侧对这些工具完全不动。
+func TestToolArgumentRenameSkipsAgreeingSchemas(t *testing.T) {
+	definition, ok := officialToolDefinition("glob", false)
+	if !ok {
+		t.Fatalf("glob definition missing")
+	}
+	if mapping := toolArgumentRename("glob", definition.Parameters, false); len(mapping) != 0 {
+		t.Errorf("glob already agrees, got mapping %v", mapping)
+	}
+}
+
+// TestResponseRestoresClientArguments 走一遍完整往返：按官方 schema 发出去，模型
+// 用官方参数名回答，响应侧必须还原成客户端自己的参数名。
+func TestResponseRestoresClientArguments(t *testing.T) {
+	payload := map[string]any{"tools": dshSchemaTools()}
+	renames, ok := renameAndCompleteTools(payload, protocol.Chat, false, "")
+	if !ok {
+		t.Fatalf("shaping declined")
+	}
+	answer := []byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"edit","arguments":"{\"path\":\"/tmp/a.txt\",\"oldString\":\"a\",\"newString\":\"b\",\"replaceAll\":true}"}}]}}]}`)
+	restored := protocol.RenameResponseTool(answer, protocol.Chat, renames)
+
+	var decoded struct {
+		Choices []struct {
+			Message struct {
+				ToolCalls []struct {
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(restored, &decoded); err != nil {
+		t.Fatalf("decode restored response: %v", err)
+	}
+	call := decoded.Choices[0].Message.ToolCalls[0].Function
+	if call.Name != "edit" {
+		t.Errorf("name = %q, want edit", call.Name)
+	}
+	var arguments map[string]any
+	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
+		t.Fatalf("decode arguments: %v", err)
+	}
+	want := map[string]any{
+		"file_path":   "/tmp/a.txt",
+		"old_string":  "a",
+		"new_string":  "b",
+		"replace_all": true,
+	}
+	if !reflect.DeepEqual(arguments, want) {
+		t.Errorf("arguments = %v, want %v", arguments, want)
+	}
+}

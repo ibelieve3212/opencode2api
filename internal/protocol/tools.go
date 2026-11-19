@@ -35,6 +35,11 @@ type ToolRenames struct {
 	toWire   map[string]string
 	toClient map[string]string
 	official map[string]string
+	// args maps a wire tool name to the official-to-client argument rename for
+	// that tool. The gateway sends the official definition, so the model answers
+	// in the official schema; the client's handler only accepts the argument
+	// names it declared. A tool whose schemas already agree has no entry.
+	args map[string]map[string]string
 	// byCase and byShape map a folded client name back to the one declared
 	// client tool it names. A value of "" marks a fold two tools share: that
 	// name is never guessed between.
@@ -48,14 +53,38 @@ func NewToolRenames() *ToolRenames {
 		toWire:   map[string]string{},
 		toClient: map[string]string{},
 		official: map[string]string{},
+		args:     map[string]map[string]string{},
 		byCase:   map[string]string{},
 		byShape:  map[string]string{},
 	}
 }
 
-// Empty reports whether no tool was renamed.
+// Empty reports whether the set has nothing to rewrite. A tool whose name and
+// schema both already match the official definition leaves no rename entry, but
+// a declared tool bound to an official name still needs the response walk to
+// recognise the call, and an argument rename alone still needs applying.
 func (r *ToolRenames) Empty() bool {
-	return r == nil || len(r.toWire) == 0
+	return r == nil || (len(r.toWire) == 0 && len(r.official) == 0 && len(r.args) == 0)
+}
+
+// BindArgs records how one wire tool's argument names map back to the client's
+// own spellings. An empty mapping records nothing.
+func (r *ToolRenames) BindArgs(wire string, mapping map[string]string) {
+	if r == nil || wire == "" || len(mapping) == 0 {
+		return
+	}
+	if r.args == nil {
+		r.args = map[string]map[string]string{}
+	}
+	r.args[wire] = mapping
+}
+
+// Args returns the official-to-client argument rename for a wire tool name.
+func (r *ToolRenames) Args(wire string) map[string]string {
+	if r == nil || wire == "" {
+		return nil
+	}
+	return r.args[wire]
 }
 
 // Count reports how many client tools were renamed.

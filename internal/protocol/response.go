@@ -553,22 +553,27 @@ func RenameResponseTool(body []byte, protocol Protocol, renames *ToolRenames) []
 // "output" and a "response" envelope, and Anthropic tool_use blocks under
 // "content_block" or "content".
 func renameToolInMap(payload map[string]any, protocol Protocol, renames *ToolRenames) bool {
-	rename := func(container map[string]any) bool {
+	rename := func(container map[string]any, arguments func(map[string]any, map[string]string) bool) bool {
 		name, ok := container["name"].(string)
-		if !ok {
+		if !ok || name == "" {
 			return false
 		}
-		client, changed := renames.Resolve(name)
-		if !changed {
-			return false
+		changed := false
+		if mapping := renames.Args(name); len(mapping) > 0 && arguments != nil {
+			if arguments(container, mapping) {
+				changed = true
+			}
 		}
-		container["name"] = client
-		return true
+		if client, renamed := renames.Resolve(name); renamed {
+			container["name"] = client
+			changed = true
+		}
+		return changed
 	}
 	renameItem := func(item map[string]any) bool {
 		switch jsonutil.StringAt(item, "type") {
 		case "function_call", "custom_tool_call":
-			return rename(item)
+			return rename(item, renameSerializedArguments)
 		default:
 			return false
 		}
@@ -582,11 +587,11 @@ func renameToolInMap(payload map[string]any, protocol Protocol, renames *ToolRen
 				container := jsonutil.MapAt(choice, key)
 				for _, rawCall := range jsonutil.SliceAt(container, "tool_calls") {
 					call, _ := rawCall.(map[string]any)
-					if function, ok := call["function"].(map[string]any); ok && rename(function) {
+					if function, ok := call["function"].(map[string]any); ok && rename(function, renameSerializedArguments) {
 						changed = true
 					}
 				}
-				if function, ok := container["function_call"].(map[string]any); ok && rename(function) {
+				if function, ok := container["function_call"].(map[string]any); ok && rename(function, renameSerializedArguments) {
 					changed = true
 				}
 			}
@@ -611,16 +616,69 @@ func renameToolInMap(payload map[string]any, protocol Protocol, renames *ToolRen
 		}
 	case Anthropic:
 		if block, ok := payload["content_block"].(map[string]any); ok {
-			if jsonutil.StringAt(block, "type") == "tool_use" && rename(block) {
+			if jsonutil.StringAt(block, "type") == "tool_use" && rename(block, renameObjectArguments) {
 				changed = true
 			}
 		}
 		for _, rawBlock := range jsonutil.SliceAt(payload, "content") {
 			block, _ := rawBlock.(map[string]any)
-			if jsonutil.StringAt(block, "type") == "tool_use" && rename(block) {
+			if jsonutil.StringAt(block, "type") == "tool_use" && rename(block, renameObjectArguments) {
 				changed = true
 			}
 		}
 	}
 	return changed
+}
+
+// renameArgumentKeys renames the argument keys of one decoded argument object
+// from the official spelling the model answered with to the spelling the client
+// declared. An argument whose client name already carries a value is left alone,
+// so two arguments never collapse onto one key.
+func renameArgumentKeys(object map[string]any, mapping map[string]string) bool {
+	changed := false
+	for official, client := range mapping {
+		value, exists := object[official]
+		if !exists || client == "" || client == official {
+			continue
+		}
+		if _, taken := object[client]; taken {
+			continue
+		}
+		delete(object, official)
+		object[client] = value
+		changed = true
+	}
+	return changed
+}
+
+// renameSerializedArguments rewrites the argument keys of one tool call whose
+// arguments travel as a JSON string, the shape Chat and Responses use.
+func renameSerializedArguments(container map[string]any, mapping map[string]string) bool {
+	raw, ok := container["arguments"].(string)
+	if !ok || raw == "" {
+		return false
+	}
+	var object map[string]any
+	if err := json.Unmarshal([]byte(raw), &object); err != nil {
+		return false
+	}
+	if !renameArgumentKeys(object, mapping) {
+		return false
+	}
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		return false
+	}
+	container["arguments"] = string(encoded)
+	return true
+}
+
+// renameObjectArguments rewrites the argument keys of one tool call whose
+// arguments travel as a decoded object, the shape Anthropic uses.
+func renameObjectArguments(container map[string]any, mapping map[string]string) bool {
+	object, ok := container["input"].(map[string]any)
+	if !ok {
+		return false
+	}
+	return renameArgumentKeys(object, mapping)
 }
