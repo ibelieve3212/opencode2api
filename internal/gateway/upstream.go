@@ -1509,6 +1509,7 @@ func setV2Headers(header http.Header, protocol wire.Protocol, ids identity.Reque
 func setTraceHeaders(header http.Header) {
 	var trace [16]byte
 	var span [8]byte
+	var parent [8]byte
 	if _, err := rand.Read(trace[:]); err != nil {
 		// crypto/rand failing leaves nothing useful to send; a missing header is
 		// a shape the gate has always tolerated, a malformed one is not.
@@ -1517,8 +1518,10 @@ func setTraceHeaders(header http.Header) {
 	rand.Read(span[:])
 	traceID := hex.EncodeToString(trace[:])
 	spanID := hex.EncodeToString(span[:])
+	rand.Read(parent[:])
+	// 2.3.2 抓包显示 b3 是四段（带 parent span），不是三段。
 	header.Set("traceparent", "00-"+traceID+"-"+spanID+"-01")
-	header.Set("b3", traceID+"-"+spanID+"-1")
+	header.Set("b3", traceID+"-"+spanID+"-1-"+hex.EncodeToString(parent[:]))
 }
 
 // v1ProviderUtils names the provider-utils version of the AI SDK package the

@@ -33,6 +33,12 @@ var opencodePromptV2 string
 //go:embed opencode_prompt_v2_codemode.txt
 var opencodePromptCodeMode string
 
+// opencode_prompt_v2_policy.txt is the "# Operating Policy" section a 2.3.2 capture
+// shows between Code Mode and the environment block. 2.3.1 had no such section.
+//
+//go:embed opencode_prompt_v2_policy.txt
+var opencodePromptPolicy string
+
 // opencodePromptMarkers identify a body that already carries an official CLI system prompt,
 // so a client that sends one itself is left alone and repeated shaping cannot duplicate it.
 //
@@ -179,14 +185,13 @@ func opencodeSystemPrompt(model string, v1 bool, tools []string, environment *co
 	// Code Mode block, then the skill listing, then the date, the environment block and
 	// the worktree guidance. 1.x has no Code Mode, so that part is v2-only.
 	if !v1 {
-		parts = append(parts, strings.TrimRight(opencodePromptCodeMode, "\n"))
+		parts = append(parts, strings.TrimRight(opencodePromptCodeMode, "\n")+"\n")
+		parts = append(parts, strings.TrimRight(opencodePromptPolicy, "\n")+"\n\n")
 	}
-	if len(disabled) > 0 {
-		parts = append(parts, toolRoutingBlock(disabled))
-	}
+	// 真机提示词里没有额外段落：未绑定的官方工具仍按 13 个声明，但不往提示词插真机没有的块。
+	_ = disabled
 	parts = append(parts,
-		opencodeSkills,
-		"Today's date: "+time.Now().UTC().Format("Mon Jan 02 2006"),
+		"Today's date: "+time.Now().Format("Mon Jan 02 2006"),
 		opencodeEnvironment(model, environment),
 		opencodeWorktreeGuidance,
 	)
@@ -243,10 +248,23 @@ func identityBlock(model string) string {
 	}
 	return strings.Join([]string{
 		"# Your Model",
-		"- Name: " + apiModel,
+		"- Name: " + modelDisplayName(apiModel),
 		"- Provider ID: opencode",
 		"- Model ID: " + apiModel,
 	}, "\n")
+}
+
+// modelDisplayName renders the catalog display name the client shows in the
+// identity block ("big-pickle" -> "Big Pickle").
+func modelDisplayName(id string) string {
+	parts := strings.FieldsFunc(id, func(r rune) bool { return r == '-' || r == '_' })
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		parts[i] = strings.ToUpper(part[:1]) + part[1:]
+	}
+	return strings.Join(parts, " ")
 }
 
 // renderBasePrompt substitutes ${OPENCODE_TOOL_GUIDANCE} with the lines the client

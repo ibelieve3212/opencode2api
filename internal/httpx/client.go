@@ -9,7 +9,7 @@ package httpx
 // every outbound request carrying `opencode/latest/2.3.1/cli`. Keep this in
 // step with a client you can inspect — read it out of a capture rather than
 // guessing.
-const v2ClientVersion = "2.3.1"
+const v2ClientVersion = "2.3.2"
 
 // v1ClientVersion is the OpenCode 1.x release the gateway claims to be on the
 // v1 lane (/zen), and v1BunVersion is the Bun runtime that release ships with.
