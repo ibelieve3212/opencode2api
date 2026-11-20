@@ -142,7 +142,7 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics, war
 		transports:     transports,
 		zenNodes:       zenNodes,
 		goNodes:        goNodes,
-		anonymous:      anonymousPool(cfg.Anonymous, transports, cooldown, anonymousBackoffFromConfig(cfg.Models.AnonymousBackoff)),
+		anonymous:      anonymousPool(cfg.Anonymous, transports, cooldown, time.Duration(cfg.Performance.QuotaParkSeconds)*time.Second, anonymousBackoffFromConfig(cfg.Models.AnonymousBackoff)),
 		warp:           warpPool,
 		catalog:        catalog,
 		monitor:        monitor,

@@ -293,6 +293,13 @@ type PerformanceConfig struct {
 	// abusive stays out of the anonymous cursor. Upstream does not publish
 	// the block duration, so the default is a conservative 15 minutes.
 	FreeTierBlockSeconds int `json:"free_tier_block_seconds"`
+	// QuotaParkSeconds bounds how long a 429 parks one exit. The free tier
+	// answers 429 with a Retry-After that counts down to the next 00:00 UTC,
+	// which is when the daily allowance resets, so an exit that reports the
+	// quota error is useless until then. Zero keeps the old short cool-down
+	// (failure_cooldown_seconds times eight); set it to 86400 to park the
+	// exit for the rest of the quota window.
+	QuotaParkSeconds int `json:"quota_park_seconds"`
 }
 
 // AttemptTimeout returns the bound for a single upstream attempt. When
@@ -461,6 +468,9 @@ func Normalize(path string, cfg Config) (Config, error) {
 	}
 	if cfg.Performance.FreeTierBlockSeconds < 0 {
 		return Config{}, errors.New("performance.free_tier_block_seconds must not be negative (0 uses the built-in cool-down)")
+	}
+	if cfg.Performance.QuotaParkSeconds < 0 {
+		return Config{}, errors.New("performance.quota_park_seconds must not be negative (0 keeps the short cool-down)")
 	}
 	if cfg.Logging.Level != "debug" && cfg.Logging.Level != "info" && cfg.Logging.Level != "warn" && cfg.Logging.Level != "error" {
 		return Config{}, errors.New("logging.level must be debug, info, warn, or error")

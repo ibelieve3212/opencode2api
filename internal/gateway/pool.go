@@ -71,7 +71,15 @@ type anonymousNodes struct {
 	nodes    []*anonymousNode
 	next     atomic.Uint64
 	cooldown time.Duration
-	hasPool  bool
+	// quotaPark bounds the cool-down a 429 may apply. The free tier counts
+	// the daily allowance per egress IP and its Retry-After counts down to the
+	// reset, so a node that reports the quota error is useless until then.
+	// Zero keeps the short cool-down that only skips it for a moment.
+	quotaPark time.Duration
+	// onPark reports one exit parked by the quota window so the controller can
+	// persist it; a rebuilt runtime restores it instead of retrying a spent IP.
+	onPark  func(address string, until time.Time)
+	hasPool bool
 	// breaker stops the whole lane after repeated failures or when every
 	// exit is under the free tier's IP block: the lane then pauses for
 	// backoff.base, doubling every further trip (one strike per trip) up to
@@ -109,8 +117,8 @@ type anonymousCursor struct {
 
 // anonymousPool builds one anonymous node per proxy transport, or an empty
 // pool when the anonymous tier is disabled.
-func anonymousPool(enabled bool, transports *proxyTransports, cooldown time.Duration, backoff anonymousBackoff) *anonymousNodes {
-	pool := &anonymousNodes{cooldown: cooldown, backoff: backoff}
+func anonymousPool(enabled bool, transports *proxyTransports, cooldown, quotaPark time.Duration, backoff anonymousBackoff) *anonymousNodes {
+	pool := &anonymousNodes{cooldown: cooldown, quotaPark: quotaPark, backoff: backoff}
 	if !enabled || transports == nil {
 		return pool
 	}
@@ -447,10 +455,20 @@ func (p *anonymousNodes) MarkFailure(node *anonymousNode, resp *http.Response, e
 	delay := p.cooldown * time.Duration(1<<min(failures-1, 3))
 	if resp != nil {
 		if retryAfter := retryAfterHint(resp.Header); retryAfter > delay {
-			delay = min(retryAfter, p.cooldown*maxAnonymousRetryAfterMultiplier)
+			cap := p.cooldown * maxAnonymousRetryAfterMultiplier
+			// Only a 429 carries the quota window; a Retry-After on any other
+			// status keeps the short cap so a stray header cannot park a node.
+			if resp.StatusCode == http.StatusTooManyRequests && p.quotaPark > 0 {
+				cap = p.quotaPark
+			}
+			delay = min(retryAfter, cap)
 		}
 	}
-	node.cooldownUntil.Store(time.Now().Add(delay).UnixNano())
+	until := time.Now().Add(delay)
+	node.cooldownUntil.Store(until.UnixNano())
+	if p.onPark != nil && node.proxy != nil {
+		p.onPark(node.proxy.name, until)
+	}
 }
 
 func (p *proxyTransports) hasHealthy() bool {

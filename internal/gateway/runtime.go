@@ -1,13 +1,16 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -73,6 +76,9 @@ type RuntimeController struct {
 	// availabilitySweep wakes the probe loop ahead of its minute tick; the
 	// capacity-one buffer coalesces requests while a sweep is in flight.
 	availabilitySweep chan struct{}
+	// parks keeps the exits the free tier parked until its quota window resets,
+	// so a config reload or a restart does not hand a spent exit back.
+	parks *parkStore
 	// warpPool is the pool shared by successive runtimes when the WARP size
 	// and stack are unchanged. warpKey is the identity used for that reuse.
 	warpPool *warp.Pool
@@ -96,6 +102,7 @@ type EffectiveListeners struct {
 func RuntimeManager(root context.Context, configPath string, cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics, hub *telemetry.LogBroker, redactor *config.Redactor, level *slog.LevelVar) (*RuntimeController, error) {
 	manager := &RuntimeController{
 		configPath: configPath, root: root, logger: logger, monitor: monitor, hub: hub, redactor: redactor, level: level,
+		parks:     newParkStore(parkPath(configPath)),
 		effective: EffectiveListeners{API: cfg.Listen, WebUI: cfg.WebUI.Listen, WebUIEnabled: cfg.WebUI.Enabled},
 	}
 	manager.metadata = modelcatalog.PricingStore(configPath, logger)
@@ -159,7 +166,65 @@ func RuntimeManager(root context.Context, configPath string, cfg config.Config, 
 	manager.start(runtime)
 	manager.metadata.Start(root)
 	manager.startAvailabilityChecks()
+	go manager.watchProxyFile()
 	return manager, nil
+}
+
+// watchProxyFile reloads the runtime when the proxy file changes, so a rotating
+// node list reaches the cursor without a restart. The reload rebuilds the
+// gateway, and parkStore restores the parked exits by address, so a reload costs
+// nothing but the rebuild.
+func (m *RuntimeController) watchProxyFile() {
+	if m == nil || m.root == nil {
+		return
+	}
+	stamp := ""
+	for {
+		path := m.proxyFilePath()
+		if path != "" {
+			// Compare contents, not mtime: the pool rewrites the list on a timer,
+			// and a rewrite with the same nodes must not rebuild the runtime.
+			if data, err := os.ReadFile(path); err == nil {
+				sum := sha256.Sum256(bytes.TrimSpace(data))
+				next := fmt.Sprintf("%x", sum[:8])
+				switch {
+				case stamp == "":
+					// The runtime was just built from this file.
+					stamp = next
+				case next != stamp:
+					stamp = next
+					if _, err := m.Reload(); err != nil {
+						m.logger.Warn("proxy file reload failed",
+							"component", "runtime", "event", "proxy_reload_failed", "path", path, "error", err)
+					} else {
+						m.logger.Info("proxy file reloaded",
+							"component", "runtime", "event", "proxy_reloaded", "path", path)
+					}
+				}
+			}
+		}
+		select {
+		case <-m.root.Done():
+			return
+		case <-time.After(15 * time.Second):
+		}
+	}
+}
+
+// proxyFilePath resolves the configured proxy file the way config load does:
+// a relative path is taken against the config file's directory.
+func (m *RuntimeController) proxyFilePath() string {
+	cfg := m.Config()
+	if cfg.ProxyFile == "" {
+		return ""
+	}
+	if filepath.IsAbs(cfg.ProxyFile) {
+		return cfg.ProxyFile
+	}
+	if m.configPath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(m.configPath), cfg.ProxyFile)
 }
 
 // migrateAvailabilityPath moves the legacy 40-bit state file to its 64-bit
@@ -201,6 +266,10 @@ func (m *RuntimeController) build(cfg config.Config) (*gatewayRuntime, error) {
 	if err != nil {
 		discardWARP()
 		return nil, err
+	}
+	if m.parks != nil {
+		m.parks.restore(gateway.anonymous)
+		gateway.anonymous.onPark = m.parks.record
 	}
 	gateway.rotation = m.rotation
 	gateway.onGoSubscriptionUnauthorized = m.invalidateGoSubscription
