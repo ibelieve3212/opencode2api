@@ -703,8 +703,37 @@ func backfillArguments(object map[string]any, values map[string]any) bool {
 		if _, present := object[argument]; present {
 			continue
 		}
-		object[argument] = zero
+		object[argument] = fillBackfill(object, zero)
 		changed = true
 	}
 	return changed
+}
+
+// fillBackfill keeps a backfilled argument acceptable to the client's own validation. A
+// string the model never saw cannot arrive empty: the client declares these as required and
+// rejects "" exactly like a missing key, which is how a description argument the official
+// schema has no room for turned every shell call into an error. The value names the call it
+// belongs to instead of inventing anything.
+func fillBackfill(object map[string]any, zero any) any {
+	text, isString := zero.(string)
+	if !isString || text != "" {
+		return zero
+	}
+	for _, key := range []string{"command", "code", "prompt", "query", "pattern", "path", "url"} {
+		value, ok := object[key].(string)
+		if !ok || strings.TrimSpace(value) == "" {
+			continue
+		}
+		return truncateRunes("Run: "+strings.TrimSpace(value), 80)
+	}
+	return "Run the requested action"
+}
+
+// truncateRunes shortens text to at most limit runes without splitting one.
+func truncateRunes(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit])
 }

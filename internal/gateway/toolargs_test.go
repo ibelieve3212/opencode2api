@@ -3,6 +3,7 @@ package gateway
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ibelieve3212/opencode2api/internal/protocol"
@@ -169,8 +170,9 @@ func TestResponseRestoresClientArguments(t *testing.T) {
 }
 
 // TestResponseBackfillsClientRequiredArguments 断言客户端声明必填、但官方 schema 装不下的
-// 参数，会在响应侧补上零值。dsh 的 shell 要求 description，官方 shell 没有这个属性，模型
-// 不可能给出它 —— 不补，客户端就以 missing required property 拒掉整次调用。
+// 参数，会在响应侧补上一个值。dsh 的 shell 要求 description，官方 shell 没有这个属性，模型
+// 不可能给出它 —— 不补，客户端就以 missing required property 拒掉整次调用；补成空串，客户端
+// 又以 expected a non-empty string 拒掉，所以补出来的值必须能描述这次调用。
 func TestResponseBackfillsClientRequiredArguments(t *testing.T) {
 	payload := map[string]any{"tools": dshSchemaTools()}
 	renames, ok := renameAndCompleteTools(payload, protocol.Chat, false, "")
@@ -202,8 +204,12 @@ func TestResponseBackfillsClientRequiredArguments(t *testing.T) {
 	if !present {
 		t.Fatalf("client-required description was not backfilled: %v", arguments)
 	}
-	if description != "" {
-		t.Errorf("description = %v, want the empty string", description)
+	text, isString := description.(string)
+	if !isString || text == "" {
+		t.Errorf("description = %v, want a non-empty string: the client rejects an empty description", description)
+	}
+	if !strings.Contains(text, "pwd") {
+		t.Errorf("description = %q, want it to name the command it belongs to", text)
 	}
 	if arguments["command"] != "pwd" {
 		t.Errorf("command = %v, want pwd", arguments["command"])
