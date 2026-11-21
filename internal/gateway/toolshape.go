@@ -566,16 +566,13 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 		}
 		shaped = append(shaped, entry)
 	}
-	// 客户端声明了自己的工具，就只能派发它声明过的那些。把没人认领的内置工具也塞进去，等于
-	// 给模型一个客户端答不上来的名字：Code Mode 的 xecute 就这样变成 unknown tool 打断整轮。
-	// 整套内置工具只在调用方一个工具都没声明时才作为替身发出去。
-	if len(declaredNames) == 0 {
-		for _, official := range officialNames {
-			if _, covered := standIn[official]; covered {
-				continue
-			}
-			shaped = append(shaped, officialTool(protocol, official, v1, platform))
+	// 官方工具集必须补齐：少一个，上游就按伪造的请求回同一个 429，和额度耗尽无法区分。
+	// 客户端派发不了的那几个，由提示词里的 # Tool routing 段点名，让模型别去调。
+	for _, official := range officialNames {
+		if _, covered := standIn[official]; covered {
+			continue
 		}
+		shaped = append(shaped, officialTool(protocol, official, v1, platform))
 	}
 	payload["tools"] = shaped
 	declared := make(map[string]string, len(declaredNames))

@@ -747,7 +747,7 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool, environm
 			changed = true
 		}
 	}
-	if injectOfficialPrompt(payload, protocol, v1, environment, payloadHasTool(payload, protocol, "execute")) {
+	if injectOfficialPrompt(payload, protocol, v1, environment, unaliasedOfficialTools(renames, v1)) {
 		changed = true
 	}
 	if !v1 && protocol == wire.Chat && ensureV2CompletionLimit(payload, maxOutput) {
