@@ -566,11 +566,16 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 		}
 		shaped = append(shaped, entry)
 	}
-	for _, official := range officialNames {
-		if _, covered := standIn[official]; covered {
-			continue
+	// 客户端声明了自己的工具，就只能派发它声明过的那些。把没人认领的内置工具也塞进去，等于
+	// 给模型一个客户端答不上来的名字：Code Mode 的 xecute 就这样变成 unknown tool 打断整轮。
+	// 整套内置工具只在调用方一个工具都没声明时才作为替身发出去。
+	if len(declaredNames) == 0 {
+		for _, official := range officialNames {
+			if _, covered := standIn[official]; covered {
+				continue
+			}
+			shaped = append(shaped, officialTool(protocol, official, v1, platform))
 		}
-		shaped = append(shaped, officialTool(protocol, official, v1, platform))
 	}
 	payload["tools"] = shaped
 	declared := make(map[string]string, len(declaredNames))
@@ -616,6 +621,22 @@ func foldToolForMatch(name string) string {
 		}
 	}
 	return builder.String()
+}
+
+// payloadHasTool reports whether the request declares the named tool, so the prompt
+// only describes tools the model will actually see.
+func payloadHasTool(payload map[string]any, protocol wire.Protocol, name string) bool {
+	items, _ := payload["tools"].([]any)
+	for _, item := range items {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if got, ok := renamableToolName(protocol, entry); ok && got == name {
+			return true
+		}
+	}
+	return false
 }
 
 // unaliasedOfficialTools lists the official tools that were appended to the request but that no

@@ -174,7 +174,7 @@ var opencodeTempDirectory = filepath.Join(os.TempDir(), "opencode")
 // and the openai-chat protocol module (chunk-a3k2v7ew.js) builds
 // `[{ role: "system", content: $U(system) }]`. An empty array emits no system message.
 // This was "\n\n" here until it was checked against the binary.
-func opencodeSystemPrompt(model string, v1 bool, tools []string, environment *config.PromptEnvironmentConfig, disabled []string) string {
+func opencodeSystemPrompt(model string, v1 bool, tools []string, environment *config.PromptEnvironmentConfig, codeMode bool) string {
 	base := renderBasePrompt(opencodePromptV2, tools)
 	if v1 {
 		base = renderBasePrompt(opencodePromptV1, tools)
@@ -184,12 +184,12 @@ func opencodeSystemPrompt(model string, v1 bool, tools []string, environment *co
 	// parts are written in the binary: the base prompt and identity first, then the
 	// Code Mode block, then the skill listing, then the date, the environment block and
 	// the worktree guidance. 1.x has no Code Mode, so that part is v2-only.
-	if !v1 {
+	if !v1 && codeMode {
 		parts = append(parts, strings.TrimRight(opencodePromptCodeMode, "\n")+"\n")
 		parts = append(parts, strings.TrimRight(opencodePromptPolicy, "\n")+"\n\n")
 	}
-	// 真机提示词里没有额外段落：未绑定的官方工具仍按 13 个声明，但不往提示词插真机没有的块。
-	_ = disabled
+	// Code Mode 只描述 xecute 这一个工具：请求里没有 execute 时还留着这段，模型会去调
+	// 一个不存在的工具，客户端只能回 unknown tool，整轮就此失败。
 	parts = append(parts,
 		"Today's date: "+time.Now().Format("Mon Jan 02 2006"),
 		opencodeEnvironment(model, environment),
@@ -304,12 +304,12 @@ func renderBasePrompt(prompt string, tools []string) string {
 // already carries the marker is left untouched, so repeated shaping cannot
 // duplicate the prompt. System One payloads are not chat bodies and are never
 // touched.
-func injectOfficialPrompt(payload map[string]any, protocol wire.Protocol, v1 bool, environment *config.PromptEnvironmentConfig, disabled []string) bool {
+func injectOfficialPrompt(payload map[string]any, protocol wire.Protocol, v1 bool, environment *config.PromptEnvironmentConfig, codeMode bool) bool {
 	if payload == nil || protocol == wire.SystemOne {
 		return false
 	}
 	model, _ := payload["model"].(string)
-	prompt := opencodeSystemPrompt(model, v1, opencodeToolNames(payload, v1), environment, disabled)
+	prompt := opencodeSystemPrompt(model, v1, opencodeToolNames(payload, v1), environment, codeMode)
 	switch protocol {
 	case wire.Chat:
 		return injectChatPrompt(payload, prompt)
