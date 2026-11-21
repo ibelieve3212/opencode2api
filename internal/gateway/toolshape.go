@@ -362,18 +362,16 @@ func officialToolDefinition(name string, v1 bool) (opencodeToolDefinition, bool)
 	return definition, ok
 }
 
-// strictToolSchema reports whether the 2.x Chat shape marks every tool strict:false.
+// strictToolSchema marks every 2.x Chat tool strict:false, which is what the installed
+// 2.3.2 client puts on the wire: a capture of its own request carries "strict": false
+// inside every one of the thirteen function objects. Our definitions omitted it, and a
+// request that carried tools was refused with the same 429 the quota returns while a
+// tool-free request in the same second was answered normally.
 //
-// It does not, so this is false and the field is omitted. Evidence: the installed
-// 2.3.0 release binary carries no "strict" token anywhere near its tool-definition
-// code (every hit is a TypeScript config template, a Bun internal, or a linter
-// message), and the client's own tool contract says a definition is a description
-// plus parameters — serialized by the protocol layer, where `strict` is optional and
-// nothing sets it (specs/v2/tools.md, "Tools"). An earlier comment here claimed the
-// client sent the field; that claim traced back to a proxy's own renderer rather
-// than to the client. Flip this only if the upstream starts rejecting definitions
-// that omit it.
-const strictToolSchema = false
+// The earlier note here argued the opposite from the 2.3.0 release binary, where no
+// "strict" token sits near the tool-definition code. That reading was about the binary,
+// not about the bytes the client sends; the capture settles it.
+const strictToolSchema = true
 
 // officialTool renders one official definition in the wire shape the protocol
 // expects. The captured 1.x entries carry no strict field and are rendered verbatim;
