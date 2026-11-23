@@ -388,11 +388,21 @@ func (p *Pool) WakeDue(now time.Time) (cool, buffer, dead int) {
 	return
 }
 
-// NextReset 返回下一次额度重置时刻（默认北京时间 08:00）。
+// resetLocation 是额度重置所用的时区：免费额度按北京时间每天 08:00 重置。
+// 容器默认跑在 UTC，若按进程本地时区算，08:00 会变成北京时间 16:00——整整
+// 晚八小时才开始补货，等于白白浪费一个上午。
+var resetLocation = func() *time.Location {
+	if loc, err := time.LoadLocation("Asia/Shanghai"); err == nil {
+		return loc
+	}
+	return time.FixedZone("CST", 8*3600)
+}()
+
+// NextReset 返回下一次额度重置时刻（北京时间 hour 点）。
 func NextReset(now time.Time, hour int) time.Time {
-	loc := now.Location()
-	t := time.Date(now.Year(), now.Month(), now.Day(), hour, 0, 0, 0, loc)
-	if !t.After(now) {
+	n := now.In(resetLocation)
+	t := time.Date(n.Year(), n.Month(), n.Day(), hour, 0, 0, 0, resetLocation)
+	if !t.After(n) {
 		t = t.Add(24 * time.Hour)
 	}
 	return t

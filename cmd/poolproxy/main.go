@@ -165,6 +165,9 @@ func run(o options) error {
 				log.Printf("状态：总池 %d / 健康 %d / 缓冲 %d / 冷却 %d / 坏池 %d（已探 %d，200 %d，429 %d）",
 					st.Master, st.Health, st.Buffer, st.Cool, st.Dead,
 					st.Probed, st.Healthy, st.Quota)
+				// 定期落盘：只在优雅退出时保存的话，docker rm -f / 崩溃就会丢掉
+				// 这一轮扫出来的总池与各池结论。
+				p.Save()
 			}
 		}
 	}()
