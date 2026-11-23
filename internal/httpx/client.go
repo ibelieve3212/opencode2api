@@ -5,11 +5,16 @@ package httpx
 // (the version number itself is not validated), so this only needs bumping
 // when it starts rejecting older ones.
 //
-// Ground truth for the installed client: a capture of the 2.3.1 release shows
-// every outbound request carrying `opencode/latest/2.3.1/cli`. Keep this in
-// step with a client you can inspect — read it out of a capture rather than
-// guessing.
-const v2ClientVersion = "2.3.2"
+// Ground truth for the installed client: 2.4.1 builds its User-Agent as
+// `opencode/${channel}/${version}/${name}` (packages/core/src/app.ts), with
+// name defaulting to the build artefact, which is `cli` for CLI builds
+// (packages/cli/src/version.ts), giving `opencode/latest/2.4.1/cli`.
+//
+// Diffing 2.3.2 against 2.4.1 shows the wire shape is unchanged: the header
+// block, tool schemas and system prompt are identical and model-request.ts
+// differs only in formatting. So the version string is the whole fingerprint
+// delta; bump it whenever the released CLI moves.
+const v2ClientVersion = "2.4.1"
 
 // v1ClientVersion is the OpenCode 1.x release the gateway claims to be on the
 // v1 lane (/zen), and v1BunVersion is the Bun runtime that release ships with.
