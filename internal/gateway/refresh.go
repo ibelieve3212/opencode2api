@@ -18,8 +18,13 @@ const (
 	// that serve OpenCode fine were disabled and eventually retired by a probe
 	// that never touched OpenCode. checkClaimedProxy counts any HTTP response
 	// as success, so a 404 from the origin still proves the tunnel reaches it.
-	proxyHealthCheckURL      = "https://opencode.ai/"
-	proxyHealthCheckInterval = 15 * time.Minute
+	proxyHealthCheckURL = "https://opencode.ai/"
+	// A proxy that fails a request is rechecked at once, but if that recheck
+	// also fails the next one was scheduled a quarter of an hour out: the whole
+	// gateway then fast-fails every request with "no healthy proxy available"
+	// long after the pool behind the proxy recovered. Exits come back within
+	// seconds of a quota reset or a batch release, so recheck on the same scale.
+	proxyHealthCheckInterval = 60 * time.Second
 	proxyHealthCheckTimeout  = 10 * time.Second
 )
 
