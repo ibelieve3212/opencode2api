@@ -364,27 +364,53 @@ func (p *Pool) PruneExpired(now time.Time) int {
 }
 
 // WakeDue 把到期的冷却/缓冲/坏池条目放回候选。
-func (p *Pool) WakeDue(now time.Time) (cool, buffer, dead int) {
+//
+// maxRelease > 0 时每轮最多放回这么多个，并按到期时刻先后放：额度是 UTC 零点
+// 统一重置的，若把上万个出口一次性全放回，门槛会在同一分钟里把它们当天的免费
+// 额度全部消耗掉，等于刚解封就被自己烧光。细水长流才留得住产能。
+func (p *Pool) WakeDue(now time.Time, maxRelease int) (cool, buffer, dead int) {
+	type due struct {
+		ip string
+		at time.Time
+	}
+	var pending []due
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	for ip, t := range p.cool {
 		if !t.After(now) {
-			delete(p.cool, ip)
-			cool++
+			pending = append(pending, due{ip, t})
 		}
 	}
 	for ip, h := range p.buffer {
 		if !h.Until.After(now) {
-			delete(p.buffer, ip)
-			buffer++
+			pending = append(pending, due{ip, h.Until})
 		}
 	}
 	for ip, t := range p.dead {
 		if !t.After(now) {
-			delete(p.dead, ip)
+			pending = append(pending, due{ip, t})
+		}
+	}
+	if maxRelease > 0 && len(pending) > maxRelease {
+		sort.Slice(pending, func(i, j int) bool { return pending[i].at.Before(pending[j].at) })
+		pending = pending[:maxRelease]
+	}
+	for _, d := range pending {
+		if _, ok := p.cool[d.ip]; ok {
+			delete(p.cool, d.ip)
+			cool++
+			continue
+		}
+		if _, ok := p.buffer[d.ip]; ok {
+			delete(p.buffer, d.ip)
+			buffer++
+			continue
+		}
+		if _, ok := p.dead[d.ip]; ok {
+			delete(p.dead, d.ip)
 			dead++
 		}
 	}
+	p.mu.Unlock()
 	return
 }
 

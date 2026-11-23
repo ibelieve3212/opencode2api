@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ibelieve3212/opencode2api/internal/gateway"
@@ -70,6 +71,9 @@ type Gate struct {
 	Concurrency int
 	Target      int // >0 时只在健康池未满时探测；0 = 一直扫
 	Log         func(format string, args ...any)
+
+	mu        sync.Mutex
+	satisfied bool // 达标提示只打一次
 }
 
 func (g *Gate) log(format string, args ...any) {
@@ -97,6 +101,7 @@ func (g *Gate) worker(ctx context.Context) {
 		if g.Target > 0 {
 			st := g.Pool.Snapshot()
 			if st.Health >= g.Target {
+				g.noteSatisfied(st.Health)
 				select {
 				case <-ctx.Done():
 					return
@@ -189,4 +194,16 @@ func parseQuotaReset(body string, now time.Time) time.Time {
 		return time.Time{}
 	}
 	return now.Add(d)
+}
+
+// noteSatisfied 在健康池达标时提示一次：此后不再全量扫描，把每个出口当天的
+// 免费额度留给真实用户流量，而不是被门槛自己烧掉。
+func (g *Gate) noteSatisfied(health int) {
+	g.mu.Lock()
+	noted := g.satisfied
+	g.satisfied = true
+	g.mu.Unlock()
+	if !noted {
+		g.log("健康池达标（%d/%d）：停止全量扫描，额度留给真实流量", health, g.Target)
+	}
 }

@@ -48,6 +48,7 @@ type options struct {
 	bufferStrike int
 	deadTTL      time.Duration
 	sweep        bool
+	releaseBatch int
 }
 
 func run(o options) error {
@@ -161,7 +162,7 @@ func run(o options) error {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				c, b, d := p.WakeDue(time.Now())
+				c, b, d := p.WakeDue(time.Now(), o.releaseBatch)
 				if c+b+d > 0 {
 					log.Printf("到点放回候选：冷却 %d、缓冲 %d、坏池 %d", c, b, d)
 				}
