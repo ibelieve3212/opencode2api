@@ -7,6 +7,8 @@ package pool
 
 import (
 	"context"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,7 +33,12 @@ func Classify(res gateway.ExitProbeResult, cfg Config) Verdict {
 		v.Kind, v.Reason = "healthy", "真实请求 200"
 	case res.Status == 429:
 		v.Kind, v.Reason = "quota", "429 额度墙"
-		v.Reset = NextReset(time.Now(), cfg.ResetHour)
+		// 上游的 429 报文自带解封时刻，按它冷却比一律押到下一个 08:00 精确得多：
+		// 免费额度按 IP 滚动 24 小时，各 IP 的解封点并不相同。
+		v.Reset = parseQuotaReset(res.Body, time.Now())
+		if v.Reset.IsZero() {
+			v.Reset = NextReset(time.Now(), cfg.ResetHour)
+		}
 	case res.Status == 401 || res.Status == 403:
 		v.Kind, v.Note, v.Reason = "buffered", "auth", "认证/形状不符"
 	case res.Status >= 500:
@@ -151,4 +158,35 @@ func (g *Gate) apply(e *Exit, v Verdict) {
 		g.log("x 坏池：%s %s，睡到 %s 再体检", e.Token(), v.Reason,
 			until.Format("01-02 15:04"))
 	}
+}
+
+// quotaResetRe 匹配上游 429 报文里的 "in 19h20m44s (at 2026-11-24 00:14:10 UTC)"。
+var quotaResetRe = regexp.MustCompile(`in\s+(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?\s*\(at\s+([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC)\)`)
+
+// parseQuotaReset 取出该出口自己解封的时刻；取不到返回零值，由调用方兜底。
+func parseQuotaReset(body string, now time.Time) time.Time {
+	m := quotaResetRe.FindStringSubmatch(body)
+	if m == nil {
+		return time.Time{}
+	}
+	// 优先用绝对时刻：它是上游算好的，不受往返误差影响。
+	if t, err := time.Parse("2006-01-02 15:04:05 MST", m[4]); err == nil && t.After(now) {
+		return t
+	}
+	var hours, minutes, seconds int
+	if m[1] != "" {
+		hours, _ = strconv.Atoi(m[1])
+	}
+	if m[2] != "" {
+		minutes, _ = strconv.Atoi(m[2])
+	}
+	if m[3] != "" {
+		seconds, _ = strconv.Atoi(m[3])
+	}
+	d := time.Duration(hours)*time.Hour + time.Duration(minutes)*time.Minute +
+		time.Duration(seconds)*time.Second
+	if d <= 0 {
+		return time.Time{}
+	}
+	return now.Add(d)
 }
