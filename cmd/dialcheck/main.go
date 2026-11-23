@@ -55,6 +55,6 @@ func main() {
 			fmt.Printf("TLS 握手失败: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("TLS 握手成功: %s\n", tlsConn.ConnectionState().Version)
+		fmt.Printf("TLS 握手成功: %s\n", tls.VersionName(tlsConn.ConnectionState().Version))
 	}
 }

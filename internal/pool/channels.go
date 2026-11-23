@@ -35,11 +35,11 @@ func (c *Channel) enabled() bool { return c.Enabled == nil || *c.Enabled }
 
 // Channels 管理渠道清单与抓取。
 type Channels struct {
-	path string
-	mu   sync.Mutex
-	list []*Channel
-	rr   int                // 轮换游标
-	dirty map[string]bool   // 报过认证失败的渠道名
+	path   string
+	mu     sync.Mutex
+	list   []*Channel
+	rr     int             // 轮换游标
+	dirty  map[string]bool // 报过认证失败的渠道名
 	client *http.Client
 }
 
@@ -311,7 +311,7 @@ func (c *Channels) rowsToExits(rows []map[string]any, ch *Channel) []*Exit {
 		expire, _ := num(row["expire_at"])
 		out = append(out, &Exit{
 			IP: ip, Port: port, Kind: KindExt,
-			User: firstNonEmpty(str(row["username"]), str(row["user"])),
+			User:   firstNonEmpty(str(row["username"]), str(row["user"])),
 			Secret: secretOf(row), Channel: ch.Name,
 			ExpireAt: int64(expire), Born: now,
 		})

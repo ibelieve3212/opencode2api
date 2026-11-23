@@ -19,11 +19,11 @@ import (
 
 // Listener 把三条监听串在一起，便于 main 统一拉起。
 type Listener struct {
-	Pool     *Pool
-	Log      func(format string, args ...any)
-	Host     string // 导出给 nodes.txt 用
-	TokenPort int
-	RelayPort int
+	Pool        *Pool
+	Log         func(format string, args ...any)
+	Host        string // 导出给 nodes.txt 用
+	TokenPort   int
+	RelayPort   int
 	DialTimeout time.Duration
 }
 

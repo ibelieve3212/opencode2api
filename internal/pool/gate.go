@@ -55,14 +55,14 @@ func Classify(res gateway.ExitProbeResult, cfg Config) Verdict {
 
 // Gate 是并发门槛。
 type Gate struct {
-	Pool       *Pool
-	Channels   *Channels
-	BaseURL    string
-	Model      string
-	Timeout    time.Duration
+	Pool        *Pool
+	Channels    *Channels
+	BaseURL     string
+	Model       string
+	Timeout     time.Duration
 	Concurrency int
-	Target     int // >0 时只在健康池未满时探测；0 = 一直扫
-	Log        func(format string, args ...any)
+	Target      int // >0 时只在健康池未满时探测；0 = 一直扫
+	Log         func(format string, args ...any)
 }
 
 func (g *Gate) log(format string, args ...any) {

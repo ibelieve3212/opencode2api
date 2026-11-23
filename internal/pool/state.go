@@ -40,11 +40,11 @@ func DefaultConfig() Config {
 
 // Stats 是给日志/状态用的计数。
 type Stats struct {
-	Master   int `json:"master"`
-	Health   int `json:"health"`
-	Buffer   int `json:"buffer"`
-	Cool     int `json:"cool"`
-	Dead     int `json:"dead"`
+	Master   int   `json:"master"`
+	Health   int   `json:"health"`
+	Buffer   int   `json:"buffer"`
+	Cool     int   `json:"cool"`
+	Dead     int   `json:"dead"`
 	Probed   int64 `json:"probed"`
 	Healthy  int64 `json:"healthy"`
 	Quota    int64 `json:"quota"`
@@ -57,15 +57,15 @@ type Stats struct {
 type Pool struct {
 	cfg Config
 
-	mu     sync.Mutex
-	master map[string]*Exit      // 总池：ip -> 出口
-	health map[string]*Exit      // 健康池：token -> 出口
-	cool   map[string]time.Time  // 冷却池：ip -> 到期
-	buffer map[string]*Hold      // 缓冲池
-	dead   map[string]time.Time  // 坏池
-	inFlight map[string]bool     // 正在探测的 ip
-	idx    int
-	stats  Stats
+	mu       sync.Mutex
+	master   map[string]*Exit     // 总池：ip -> 出口
+	health   map[string]*Exit     // 健康池：token -> 出口
+	cool     map[string]time.Time // 冷却池：ip -> 到期
+	buffer   map[string]*Hold     // 缓冲池
+	dead     map[string]time.Time // 坏池
+	inFlight map[string]bool      // 正在探测的 ip
+	idx      int
+	stats    Stats
 
 	dir string
 }
@@ -290,7 +290,6 @@ func (p *Pool) Candidates(limit int, now time.Time) []*Exit {
 	}
 	return out
 }
-
 
 // InFlight 返回正在探测中的出口数。
 func (p *Pool) InFlight() int {
