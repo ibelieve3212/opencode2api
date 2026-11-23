@@ -63,8 +63,10 @@ func run(o options) error {
 	if err != nil {
 		return fmt.Errorf("初始化池子: %w", err)
 	}
-	restored := p.LoadSnapshot()
-	log.Printf("本地快照恢复 %d 个外部出口（无需联网）", restored)
+	p.LoadSnapshot()
+	st0 := p.Snapshot()
+	log.Printf("本地快照恢复：总池 %d / 冷却 %d / 缓冲 %d / 坏池 %d（无需联网）",
+		st0.Master, st0.Cool, st0.Buffer, st0.Dead)
 
 	ch, err := pool.NewChannels(o.channelsFile)
 	if err != nil {
