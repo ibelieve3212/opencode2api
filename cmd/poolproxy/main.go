@@ -113,8 +113,10 @@ func run(o options) error {
 	// 渠道保鲜：本地快照是主体。但首轮必须全量拉一遍——否则 67 个渠道
 	// 按每轮 8 个轮换，要一个多小时才能把所有池子的出口收齐，在这期间
 	// 池子只有几千个候选，白白少了大半产能。
-	refreshChannels(p, ch, ch.Count())
+	// 首轮全量必须放到后台：67 个第三方面板要几十秒到几分钟，
+	// 放在主协程里会把状态日志、nodes.txt 导出全堵死，看起来像卡死。
 	go func() {
+		refreshChannels(p, ch, ch.Count())
 		t := time.NewTicker(o.refresh)
 		defer t.Stop()
 		for {
@@ -222,24 +224,40 @@ func refreshChannels(p *pool.Pool, ch *pool.Channels, batch int) {
 		close(results)
 	}()
 
-	added, refreshed, accounts, failed := 0, 0, 0, 0
-	// 边到边合并：一个慢渠道不该拖住其余渠道的出口入库。
-	// 否则首批全量拉取要等全部返回才落地，中途整个池子只有旧快照。
-	for r := range results {
-		if r.err != nil {
-			failed++
-			log.Printf("渠道 %s 拉取失败: %v", r.name, r.err)
-			continue
-		}
-		accounts += len(r.exits)
-		for _, e := range r.exits {
-			a, rf := p.UpsertMaster(e)
-			if a {
-				added++
+	added, refreshed, accounts, failed, doneCh := 0, 0, 0, 0, 0
+	// 边到边合并：一个慢渠道不该拖住其余渠道的出口入库。整轮最多等 5 分钟，
+	// 到点就带着已入库的部分收工——第三方面板拖住我们是没有意义的。
+	deadline := time.After(5 * time.Minute)
+merge:
+	for {
+		select {
+		case r, ok := <-results:
+			if !ok {
+				break merge
 			}
-			if rf {
-				refreshed++
+			doneCh++
+			if doneCh%10 == 0 {
+				log.Printf("渠道刷新进度 %d/%d（已入库 %d）", doneCh, len(picked), added)
 			}
+			if r.err != nil {
+				failed++
+				log.Printf("渠道 %s 拉取失败: %v", r.name, r.err)
+				continue
+			}
+			accounts += len(r.exits)
+			for _, e := range r.exits {
+				a, rf := p.UpsertMaster(e)
+				if a {
+					added++
+				}
+				if rf {
+					refreshed++
+				}
+			}
+		case <-deadline:
+			log.Printf("渠道刷新超过 5 分钟，放弃剩余 %d 个渠道（已入库 %d）",
+				len(picked)-doneCh, added)
+			break merge
 		}
 	}
 	st := p.Snapshot()
