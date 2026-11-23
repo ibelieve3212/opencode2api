@@ -132,6 +132,9 @@ jobs:
         run: |
           mkdir -p "dist/$PACKAGE_NAME"
           go build -trimpath -ldflags="-s -w -X main.version=$RELEASE_TAG" -o "dist/$PACKAGE_NAME/opencode2api$EXTENSION" ./cmd/opencode2api
+          # 池子与出口对比工具跟主程序一起发，版本天然对齐。
+          go build -trimpath -ldflags="-s -w" -o "dist/$PACKAGE_NAME/poolproxy$EXTENSION" ./cmd/poolproxy
+          go build -trimpath -ldflags="-s -w" -o "dist/$PACKAGE_NAME/exitprobe$EXTENSION" ./cmd/exitprobe
           cp README.md README.zh-CN.md README.vi.md README.it.md LICENSE config.example.json "dist/$PACKAGE_NAME/"
           cp -r docs "dist/$PACKAGE_NAME/"
           if [[ "$ARCHIVE_FORMAT" == "zip" ]]; then

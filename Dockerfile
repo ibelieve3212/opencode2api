@@ -19,6 +19,23 @@ RUN CGO_ENABLED=0 \
       -ldflags="-s -w -X main.version=${VERSION}" \
       -o /out/opencode2api ./cmd/opencode2api
 
+# poolproxy 是代理池本体：五池管理 + 进程内 bun 指纹探测，与主程序同一份
+# 源码、同一个版本。exitprobe 是它的出口对比工具。
+RUN CGO_ENABLED=0 \
+    GOOS="${TARGETOS:-linux}" \
+    GOARCH="${TARGETARCH:-amd64}" \
+    go build \
+      -trimpath \
+      -ldflags="-s -w" \
+      -o /out/poolproxy ./cmd/poolproxy && \
+    CGO_ENABLED=0 \
+    GOOS="${TARGETOS:-linux}" \
+    GOARCH="${TARGETARCH:-amd64}" \
+    go build \
+      -trimpath \
+      -ldflags="-s -w" \
+      -o /out/exitprobe ./cmd/exitprobe
+
 FROM alpine:3.22
 
 RUN apk add --no-cache ca-certificates su-exec tzdata \
@@ -28,6 +45,8 @@ RUN apk add --no-cache ca-certificates su-exec tzdata \
     && chown -R opencode2api:opencode2api /app /var/lib/opencode2api
 
 COPY --from=builder /out/opencode2api /usr/local/bin/opencode2api
+COPY --from=builder /out/poolproxy /usr/local/bin/poolproxy
+COPY --from=builder /out/exitprobe /usr/local/bin/exitprobe
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 COPY --chown=opencode2api:opencode2api config.example.json /app/config.example.json
 COPY LICENSE /usr/share/licenses/opencode2api/LICENSE
