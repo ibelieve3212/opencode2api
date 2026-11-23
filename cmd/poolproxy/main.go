@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -109,7 +110,10 @@ func run(o options) error {
 		}
 	}()
 
-	// 渠道保鲜：本地快照是主体，网络只补一小批
+	// 渠道保鲜：本地快照是主体。但首轮必须全量拉一遍——否则 67 个渠道
+	// 按每轮 8 个轮换，要一个多小时才能把所有池子的出口收齐，在这期间
+	// 池子只有几千个候选，白白少了大半产能。
+	refreshChannels(p, ch, ch.Count())
 	go func() {
 		t := time.NewTicker(o.refresh)
 		defer t.Stop()
@@ -122,7 +126,6 @@ func run(o options) error {
 			}
 		}
 	}()
-	refreshChannels(p, ch, o.refreshBatch)
 
 	// 导出 nodes.txt
 	go func() {
@@ -184,26 +187,59 @@ func refreshChannels(p *pool.Pool, ch *pool.Channels, batch int) {
 	if len(picked) == 0 {
 		return
 	}
-	added, refreshed, accounts := 0, 0, 0
-	for _, c := range picked {
-		exits, err := ch.Fetch(c)
-		if err != nil {
-			log.Printf("渠道 %s 拉取失败: %v", c.Name, err)
+	// 并发抓取：渠道是不同主机，串行时一个慢面板（25 秒超时）就会把整轮
+	// 拖成几十分钟。8 路并发既快又不会把任何单个面板打满。
+	type result struct {
+		exits []*pool.Exit
+		err   error
+		name  string
+	}
+	jobs := make(chan *pool.Channel)
+	results := make(chan result, len(picked))
+	var wg sync.WaitGroup
+	workers := 8
+	if len(picked) < workers {
+		workers = len(picked)
+	}
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for c := range jobs {
+				exits, err := ch.Fetch(c)
+				results <- result{exits: exits, err: err, name: c.Name}
+			}
+		}()
+	}
+	go func() {
+		for _, c := range picked {
+			jobs <- c
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
+
+	added, refreshed, accounts, failed := 0, 0, 0, 0
+	for r := range results {
+		if r.err != nil {
+			failed++
+			log.Printf("渠道 %s 拉取失败: %v", r.name, r.err)
 			continue
 		}
-		accounts += len(exits)
-		for _, e := range exits {
-			a, r := p.UpsertMaster(e)
+		accounts += len(r.exits)
+		for _, e := range r.exits {
+			a, rf := p.UpsertMaster(e)
 			if a {
 				added++
 			}
-			if r {
+			if rf {
 				refreshed++
 			}
 		}
 	}
 	st := p.Snapshot()
-	log.Printf("外部渠道：%s，账号 %d 个，新增 %d，凭据更新 %d，在册 %d",
-		why, accounts, added, refreshed, st.Master)
+	log.Printf("外部渠道：%s，账号 %d 个，新增 %d，凭据更新 %d，失败 %d，在册 %d",
+		why, accounts, added, refreshed, failed, st.Master)
 	p.SaveSnapshot()
 }
