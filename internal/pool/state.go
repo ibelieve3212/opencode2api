@@ -67,6 +67,13 @@ type Pool struct {
 	idx      int
 	stats    Stats
 
+	// 候选列表缓存：主池上万条时，每次取候选都整体排序会让 96 个探针把锁抢死。
+	// 只在主池变动（masterVer 变化）时重建一次。
+	candList  []string
+	candScan  int
+	candVer   uint64
+	masterVer uint64
+
 	dir string
 }
 
@@ -274,15 +281,23 @@ func (p *Pool) Candidates(limit int, now time.Time) []*Exit {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make([]*Exit, 0, limit)
-	// 从新到旧：刚同步进来的才活得下来。
-	ips := make([]string, 0, len(p.master))
-	for ip := range p.master {
-		ips = append(ips, ip)
+	if len(p.master) == 0 {
+		return out
 	}
-	sort.Slice(ips, func(i, j int) bool {
-		return p.master[ips[i]].Born.After(p.master[ips[j]].Born)
-	})
-	for _, ip := range ips {
+	// 只有主池变动时才重排：刚同步进来的优先，别把探针耗在失效的老节点上。
+	if p.candVer != p.masterVer || len(p.candList) != len(p.master) {
+		p.candList = p.candList[:0]
+		for ip := range p.master {
+			p.candList = append(p.candList, ip)
+		}
+		sort.Slice(p.candList, func(a, b int) bool {
+			return p.master[p.candList[a]].Born.After(p.master[p.candList[b]].Born)
+		})
+		p.candVer = p.masterVer
+	}
+	n := len(p.candList)
+	for i := 0; i < n && len(out) < limit; i++ {
+		ip := p.candList[(p.candScan+i)%n]
 		e := p.master[ip]
 		if e == nil || e.Expired(now) || p.inFlight[ip] || p.IsBlocked(ip, now) {
 			continue
@@ -292,11 +307,17 @@ func (p *Pool) Candidates(limit int, now time.Time) []*Exit {
 		}
 		p.inFlight[ip] = true
 		out = append(out, e.Clone())
-		if len(out) >= limit {
-			break
-		}
 	}
+	p.candScan = (p.candScan + len(out)) % n
 	return out
+}
+
+// HealthCount 只取健康池大小：探针不该为了看一眼目标是否达成而遍历全池。
+func (p *Pool) HealthCount() int {
+	p.mu.Lock()
+	n := len(p.health)
+	p.mu.Unlock()
+	return n
 }
 
 // InFlight 返回正在探测中的出口数。
@@ -339,6 +360,7 @@ func (p *Pool) UpsertMaster(e *Exit) (added bool, refreshed bool) {
 	old := p.master[e.IP]
 	if old == nil {
 		p.master[e.IP] = e.Clone()
+		p.masterVer++
 		return true, false
 	}
 	if old.User != e.User || old.Secret != e.Secret || old.Port != e.Port {
@@ -365,6 +387,7 @@ func (p *Pool) PruneExpired(now time.Time) int {
 			delete(p.master, ip)
 			delete(p.buffer, ip)
 			delete(p.cool, ip)
+			p.masterVer++
 			n++
 		}
 	}

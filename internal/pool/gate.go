@@ -71,6 +71,7 @@ type Gate struct {
 	Concurrency int
 	Target      int // >0 时只在健康池未满时探测；0 = 一直扫
 	Log         func(format string, args ...any)
+	jobs        chan *Exit
 
 	mu        sync.Mutex
 	satisfied bool // 达标提示只打一次
@@ -83,43 +84,67 @@ func (g *Gate) log(format string, args ...any) {
 }
 
 // Run 启动并发探针，直到 ctx 结束。
+//
+// 只有"一个"调度器负责取候选、看目标并投喂 worker：若让 96 个 worker 各自
+// 去算候选与目标，会把池子的锁抢死（实测 CPU 100%、渠道都入不了库）。
 func (g *Gate) Run(ctx context.Context) {
 	n := g.Concurrency
 	if n <= 0 {
 		n = 64
 	}
+	g.jobs = make(chan *Exit, n*2)
 	for i := 0; i < n; i++ {
 		go g.worker(ctx)
+	}
+	go g.dispatch(ctx)
+}
+
+// dispatch 是唯一的候选生产者：补满并发槽位，然后交给 worker 去探。
+func (g *Gate) dispatch(ctx context.Context) {
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			close(g.jobs)
+			return
+		case <-tick.C:
+		}
+		need := g.Concurrency - len(g.jobs) - g.Pool.InFlight()
+		if need <= 0 {
+			continue
+		}
+		if g.Target > 0 {
+			health := g.Pool.HealthCount()
+			if health >= g.Target {
+				g.noteSatisfied(health)
+				continue
+			}
+			if rest := g.Target - health; need > rest {
+				need = rest
+			}
+		}
+		for _, e := range g.Pool.Candidates(need, time.Now()) {
+			select {
+			case g.jobs <- e:
+			default:
+				g.Pool.FinishProbe(e.IP) // 队列满，退回在飞标记
+			}
+		}
 	}
 }
 
 func (g *Gate) worker(ctx context.Context) {
 	for {
-		if ctx.Err() != nil {
+		select {
+		case <-ctx.Done():
 			return
-		}
-		if g.Target > 0 {
-			st := g.Pool.Snapshot()
-			if st.Health >= g.Target {
-				g.noteSatisfied(st.Health)
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(300 * time.Millisecond):
-				}
-				continue
-			}
-		}
-		cands := g.Pool.Candidates(1, time.Now())
-		if len(cands) == 0 {
-			select {
-			case <-ctx.Done():
+		case e, ok := <-g.jobs:
+			if !ok {
 				return
-			case <-time.After(500 * time.Millisecond):
 			}
-			continue
+			g.probe(ctx, e)
 		}
-		g.probe(ctx, cands[0])
 	}
 }
 
