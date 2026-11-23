@@ -197,7 +197,9 @@ func refreshChannels(p *pool.Pool, ch *pool.Channels, batch int) {
 	jobs := make(chan *pool.Channel)
 	results := make(chan result, len(picked))
 	var wg sync.WaitGroup
-	workers := 8
+	// 4 路足够：面板是第三方基础设施，多个渠道往往在同一批主机上，
+	// 并发拉高会被直接掐连接（实测 8 路时大量 unexpected EOF）。
+	workers := 4
 	if len(picked) < workers {
 		workers = len(picked)
 	}
@@ -221,6 +223,8 @@ func refreshChannels(p *pool.Pool, ch *pool.Channels, batch int) {
 	}()
 
 	added, refreshed, accounts, failed := 0, 0, 0, 0
+	// 边到边合并：一个慢渠道不该拖住其余渠道的出口入库。
+	// 否则首批全量拉取要等全部返回才落地，中途整个池子只有旧快照。
 	for r := range results {
 		if r.err != nil {
 			failed++

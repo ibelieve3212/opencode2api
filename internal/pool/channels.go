@@ -46,7 +46,7 @@ type Channels struct {
 // NewChannels 读 channels.json（格式与 Python 版一致：{"channels":[...]}） 。
 func NewChannels(path string) (*Channels, error) {
 	ch := &Channels{path: path, dirty: map[string]bool{},
-		client: &http.Client{Timeout: 25 * time.Second}}
+		client: &http.Client{Timeout: 15 * time.Second}}
 	if err := ch.Reload(); err != nil {
 		return nil, err
 	}
