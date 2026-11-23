@@ -132,6 +132,11 @@ func (p *Pool) Cool(e *Exit, until time.Time) time.Time {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.dropHealthLocked(e.IP)
+	// 一个出口同一时刻只能待在一个"不予派发"的池子里。否则它会被两个计时器
+	// 同时压着，按最长那个算：本该 08:00 回冷却结束的出口，会被残留的坏池
+	// 记录多扣一整天，产能白丢；到点后还会被不同池子各验一遍，白烧额度。
+	delete(p.buffer, e.IP)
+	delete(p.dead, e.IP)
 	if until.IsZero() {
 		until = NextReset(time.Now(), p.cfg.ResetHour)
 	}
@@ -146,6 +151,8 @@ func (p *Pool) Buffer(e *Exit, kind string) (until time.Time, killed bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.dropHealthLocked(e.IP)
+	delete(p.cool, e.IP)
+	delete(p.dead, e.IP)
 	prev := p.buffer[e.IP]
 	strikes := 1
 	if prev != nil && prev.Kind == kind {
@@ -169,6 +176,7 @@ func (p *Pool) Kill(e *Exit) time.Time {
 	defer p.mu.Unlock()
 	p.dropHealthLocked(e.IP)
 	delete(p.buffer, e.IP)
+	delete(p.cool, e.IP)
 	until := time.Now().Add(p.cfg.DeadTTL)
 	p.dead[e.IP] = until
 	p.stats.Killed++
@@ -517,4 +525,72 @@ func (p *Pool) load() {
 			}
 		}
 	}
+	p.reconcileConcerned()
+}
+
+// reconcileConcerned 清掉历史遗留的"一个出口压在多个池子里"。
+// 保留最早到期的那个：出口尽快回到候选、由门槛重新判定，比被旧记录多锁一天好。
+// 返回被清理掉的多余记录数。
+func (p *Pool) reconcileConcerned() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	ips := make(map[string]struct{}, len(p.cool)+len(p.buffer)+len(p.dead))
+	for ip := range p.cool {
+		ips[ip] = struct{}{}
+	}
+	for ip := range p.buffer {
+		ips[ip] = struct{}{}
+	}
+	for ip := range p.dead {
+		ips[ip] = struct{}{}
+	}
+	for ip := range ips {
+		var untils []time.Time
+		if t, ok := p.cool[ip]; ok {
+			untils = append(untils, t)
+		}
+		if h, ok := p.buffer[ip]; ok {
+			untils = append(untils, h.Until)
+		}
+		if t, ok := p.dead[ip]; ok {
+			untils = append(untils, t)
+		}
+		if len(untils) < 2 {
+			continue
+		}
+		soonest := untils[0]
+		for _, t := range untils[1:] {
+			if t.Before(soonest) {
+				soonest = t
+			}
+		}
+		// 只留最早到期的那一条，其余删掉。
+		kept := false
+		if t, ok := p.cool[ip]; ok {
+			if !kept && t.Equal(soonest) {
+				kept = true
+			} else {
+				delete(p.cool, ip)
+				n++
+			}
+		}
+		if h, ok := p.buffer[ip]; ok {
+			if !kept && h.Until.Equal(soonest) {
+				kept = true
+			} else {
+				delete(p.buffer, ip)
+				n++
+			}
+		}
+		if t, ok := p.dead[ip]; ok {
+			if !kept && t.Equal(soonest) {
+				kept = true
+			} else {
+				delete(p.dead, ip)
+				n++
+			}
+		}
+	}
+	return n
 }
