@@ -143,6 +143,10 @@ func (c *Channels) Fetch(ch *Channel) ([]*Exit, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 		defer cancel()
 		return fetchLeigodExits(ctx, c.client, ch.Name)
+	case "uu":
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+		defer cancel()
+		return fetchUUExits(ctx, c.client, ch.Name)
 	}
 	return nil, fmt.Errorf("未知渠道类型 %q", ch.Kind)
 }
