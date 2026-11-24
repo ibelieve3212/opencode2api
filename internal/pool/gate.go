@@ -38,7 +38,14 @@ func Classify(res gateway.ExitProbeResult, cfg Config) Verdict {
 		// 免费额度按 IP 滚动 24 小时，各 IP 的解封点并不相同。
 		v.Reset = parseQuotaReset(res.Body, time.Now())
 		if v.Reset.IsZero() {
-			v.Reset = NextReset(time.Now(), cfg.ResetHour)
+			// 新版 429 报文不再给重置时刻。绝不能兜底到"下一个 08:00"：那是
+			// 最长 24 小时的冻结，而额度其实是按 IP 滚动恢复的，很多出口十
+			// 几分钟后就能用。用短冷却重试。
+			cool := cfg.QuotaFallback
+			if cool <= 0 {
+				cool = 20 * time.Minute
+			}
+			v.Reset = time.Now().Add(cool)
 		}
 	case res.Status == 401 || res.Status == 403:
 		v.Kind, v.Note, v.Reason = "buffered", "auth", "认证/形状不符"
