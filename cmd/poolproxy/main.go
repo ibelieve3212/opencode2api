@@ -89,6 +89,10 @@ func run(o options) error {
 		BaseURL: o.gateURL, Model: o.probeModel,
 		Timeout: o.probeTimeout, Concurrency: o.conc, Target: target,
 		Log: log.Printf,
+		// 变体协议（雷神/UU）不能按出口直连拨号，统一经池子自己的 token 代理。
+		ProbeURL: func(e *pool.Exit) string {
+			return fmt.Sprintf("http://%s:x@127.0.0.1:%d", e.Token(), o.tokenPort)
+		},
 	}
 	go gate.Run(ctx)
 	log.Printf("准入门槛：%d 并发进程内探测（bun 指纹，与 2api 同源），目标健康池 %d", o.conc, target)

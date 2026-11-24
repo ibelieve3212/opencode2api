@@ -71,7 +71,10 @@ type Gate struct {
 	Concurrency int
 	Target      int // >0 时只在健康池未满时探测；0 = 一直扫
 	Log         func(format string, args ...any)
-	jobs        chan *Exit
+	// ProbeURL 返回探测该出口时使用的代理地址。变体协议不能直连拨号，
+	// 必须经池子自己的 token 代理转发。留空则退回 e.ProxyURL()。
+	ProbeURL func(e *Exit) string
+	jobs     chan *Exit
 
 	mu        sync.Mutex
 	satisfied bool // 达标提示只打一次
@@ -150,7 +153,11 @@ func (g *Gate) worker(ctx context.Context) {
 
 func (g *Gate) probe(ctx context.Context, e *Exit) {
 	pctx, cancel := context.WithTimeout(ctx, g.Timeout+5*time.Second)
-	res := gateway.ProbeExit(pctx, e.ProxyURL(), g.BaseURL, g.Model, g.Timeout)
+	target := e.ProxyURL()
+	if g.ProbeURL != nil {
+		target = g.ProbeURL(e)
+	}
+	res := gateway.ProbeExit(pctx, target, g.BaseURL, g.Model, g.Timeout)
 	cancel()
 
 	v := Classify(res, g.Pool.Config())

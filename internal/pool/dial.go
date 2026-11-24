@@ -14,6 +14,9 @@ import (
 
 // DialViaExit 通过出口连到 host:port。
 func DialViaExit(ctx context.Context, e *Exit, host string, port int, timeout time.Duration) (net.Conn, error) {
+	if e.Kind == KindLeigod {
+		return dialLeigod(ctx, e, host, port, timeout)
+	}
 	d := net.Dialer{Timeout: timeout}
 	conn, err := d.DialContext(ctx, "tcp", e.Addr())
 	if err != nil {

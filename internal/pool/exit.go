@@ -16,6 +16,7 @@ type Kind string
 const (
 	KindExt    Kind = "ext"
 	KindLeigod Kind = "leigod"
+	KindUU     Kind = "uu"
 )
 
 // Exit 是一个出口。ip 用面板给的 hostname 或数字 IP 均可。

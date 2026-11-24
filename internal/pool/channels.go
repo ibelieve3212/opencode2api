@@ -7,6 +7,7 @@ package pool
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -67,7 +68,7 @@ func (c *Channels) Reload() error {
 	}
 	list := make([]*Channel, 0, len(doc.Channels))
 	for _, ch := range doc.Channels {
-		if ch != nil && ch.enabled() && ch.URL != "" {
+		if ch != nil && ch.enabled() && (ch.URL != "" || ch.Kind == "leigod" || ch.Kind == "uu") {
 			if ch.Kind == "" {
 				ch.Kind = "kingstar"
 			}
@@ -138,6 +139,10 @@ func (c *Channels) Fetch(ch *Channel) ([]*Exit, error) {
 		return c.fetchJSON(ch)
 	case "plain":
 		return c.fetchPlain(ch)
+	case "leigod":
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+		defer cancel()
+		return fetchLeigodExits(ctx, c.client, ch.Name)
 	}
 	return nil, fmt.Errorf("未知渠道类型 %q", ch.Kind)
 }

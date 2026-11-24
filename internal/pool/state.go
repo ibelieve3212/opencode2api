@@ -230,7 +230,16 @@ func (p *Pool) Pick() *Exit {
 func (p *Pool) ByToken(token string) *Exit {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.health[token].Clone()
+	if e, ok := p.health[token]; ok && e != nil {
+		return e.Clone()
+	}
+	// 门槛要能按 token 找到还没进健康池的出口，否则变体协议永远探不了。
+	for _, e := range p.master {
+		if e != nil && e.Token() == token {
+			return e.Clone()
+		}
+	}
+	return nil
 }
 
 // Tokens 返回健康池全部 token（已排序，便于稳定导出）。
@@ -291,7 +300,12 @@ func (p *Pool) Candidates(limit int, now time.Time) []*Exit {
 			p.candList = append(p.candList, ip)
 		}
 		sort.Slice(p.candList, func(a, b int) bool {
-			return p.master[p.candList[a]].Born.After(p.master[p.candList[b]].Born)
+			ea, eb := p.master[p.candList[a]], p.master[p.candList[b]]
+			ra, rb := kindRank(ea.Kind), kindRank(eb.Kind)
+			if ra != rb {
+				return ra < rb
+			}
+			return ea.Born.After(eb.Born)
 		})
 		p.candVer = p.masterVer
 	}
@@ -616,4 +630,16 @@ func (p *Pool) reconcileConcerned() int {
 		}
 	}
 	return n
+}
+
+// kindRank 决定探测顺序：变体协议（uu/雷神）优先占额度，外部面板垫底。
+func kindRank(k Kind) int {
+	switch k {
+	case KindUU:
+		return 0
+	case KindLeigod:
+		return 1
+	default:
+		return 2
+	}
 }
