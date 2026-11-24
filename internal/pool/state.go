@@ -412,7 +412,11 @@ func (p *Pool) UpsertMaster(e *Exit) (added bool, refreshed bool) {
 		old.ExpireAt = e.ExpireAt
 		old.Born = time.Now()
 		p.dropHealthLocked(e.IP)
+		// 端口/凭据变了就是换了一条可用链路：必须把旧的冷却与坏池记录清掉，
+		// 否则 UU 这种「IP 不变、端口轮换」的节点会永远躺在坏池里睡 24 小时。
 		delete(p.buffer, e.IP)
+		delete(p.cool, e.IP)
+		delete(p.dead, e.IP)
 		return false, true
 	}
 	if e.ExpireAt != 0 {
