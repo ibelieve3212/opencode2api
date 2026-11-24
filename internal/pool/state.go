@@ -33,7 +33,7 @@ func DefaultConfig() Config {
 		BufferHold:    10 * time.Minute,
 		BufferStrikes: 3,
 		DeadTTL:       24 * time.Hour,
-		QuotaFallback: 20 * time.Minute,
+		QuotaFallback: 24 * time.Hour,
 		ResetHour:     8,
 	}
 }
