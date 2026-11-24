@@ -308,6 +308,9 @@ func (p *Pool) Candidates(limit int, now time.Time) []*Exit {
 			return ea.Born.After(eb.Born)
 		})
 		p.candVer = p.masterVer
+		// 列表重建后游标必须归零：否则新加进来的高优先级渠道（uu/雷神）
+		// 会被跳过去，探针继续在老位置（ext 区）打转。
+		p.candScan = 0
 	}
 	n := len(p.candList)
 	for i := 0; i < n && len(out) < limit; i++ {
