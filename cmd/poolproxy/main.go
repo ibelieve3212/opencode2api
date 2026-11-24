@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"os/signal"
 	"sync"
@@ -130,6 +131,57 @@ func run(o options) error {
 				return
 			case <-t.C:
 				refreshChannels(p, ch, o.refreshBatch)
+			}
+		}
+	}()
+
+	// UU 是流水线：节点表分钟级轮换，必须持续补新的。
+	// 常态 3 分钟一次；健康数掉到目标一半以下时 45 秒补一次；
+	// 连续失败按 5/10/20/40/60 分钟退避——被软限流时硬撞只会更糟。
+	go func() {
+		var failures int
+		var blockUntil time.Time
+		last := time.Now()
+		tick := time.NewTicker(30 * time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+			now := time.Now()
+			if now.Before(blockUntil) {
+				continue
+			}
+			interval := 3 * time.Minute
+			if p.HealthCountByKind(pool.KindUU) < target/2 {
+				interval = 45 * time.Second
+			}
+			// ±20% 抖动，别让请求节奏像定时机器人
+			jitter := time.Duration(rand.Int63n(int64(interval/5 + 1)))
+			if now.Sub(last) < interval/2+jitter {
+				continue
+			}
+			last = now
+			added, err := refreshKind(p, ch, "uu")
+			if err != nil {
+				failures++
+				back := 5 * time.Minute
+				for i := 1; i < failures && back < time.Hour; i++ {
+					back *= 2
+				}
+				if back > time.Hour {
+					back = time.Hour
+				}
+				blockUntil = now.Add(back)
+				log.Printf("UU 拉取失败（%v），退避 %s", err, back.Round(time.Minute))
+				continue
+			}
+			failures = 0
+			if added > 0 {
+				log.Printf("UU 补充节点：+%d（健康 %d/%d）", added,
+					p.HealthCountByKind(pool.KindUU), target)
 			}
 		}
 	}()
@@ -269,4 +321,27 @@ merge:
 	log.Printf("外部渠道：%s，账号 %d 个，新增 %d，凭据更新 %d，失败 %d，在册 %d",
 		why, accounts, added, refreshed, failed, st.Master)
 	p.SaveSnapshot()
+}
+
+// refreshKind 只刷新某一类渠道，返回新增出口数。
+func refreshKind(p *pool.Pool, ch *pool.Channels, kind string) (int, error) {
+	list := ch.ByKind(kind)
+	if len(list) == 0 {
+		return 0, nil
+	}
+	added := 0
+	var lastErr error
+	for _, c := range list {
+		exits, err := ch.Fetch(c)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		for _, e := range exits {
+			if a, _ := p.UpsertMaster(e); a {
+				added++
+			}
+		}
+	}
+	return added, lastErr
 }

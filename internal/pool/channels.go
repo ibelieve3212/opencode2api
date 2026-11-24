@@ -82,6 +82,19 @@ func (c *Channels) Reload() error {
 }
 
 // Count 返回启用渠道数。
+// ByKind 返回指定类型的所有启用渠道。
+func (c *Channels) ByKind(kind string) []*Channel {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]*Channel, 0, 4)
+	for _, ch := range c.list {
+		if ch.Kind == kind {
+			out = append(out, ch)
+		}
+	}
+	return out
+}
+
 func (c *Channels) Count() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()

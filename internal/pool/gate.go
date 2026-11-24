@@ -182,6 +182,12 @@ func (g *Gate) apply(e *Exit, v Verdict) {
 		g.log("- 冷却池：%s %s，待到 %s 额度重置", e.Token(), v.Reason,
 			until.Format("01-02 15:04"))
 	case "buffered":
+		if e.Kind == KindUU && v.Note == "tunnel" {
+			// 节点已经下线，别攒在缓冲池里等 10 分钟再验
+			g.Pool.Forget(e.IP)
+			g.log("- 丢弃：%s %s（节点已过期）", e.Token(), v.Reason)
+			return
+		}
 		until, killed := g.Pool.Buffer(e, v.Note)
 		if killed {
 			g.log("x 坏池：%s %s 连续 %d 次，睡 %s", e.Token(), v.Reason,
@@ -194,6 +200,11 @@ func (g *Gate) apply(e *Exit, v Verdict) {
 			g.Channels.MarkDirty(e.Channel)
 		}
 	case "dead":
+		if e.Kind == KindUU {
+			g.Pool.Forget(e.IP)
+			g.log("- 丢弃：%s %s（连不上，节点已过期）", e.Token(), v.Reason)
+			return
+		}
 		until := g.Pool.Kill(e)
 		g.log("x 坏池：%s %s，睡到 %s 再体检", e.Token(), v.Reason,
 			until.Format("01-02 15:04"))

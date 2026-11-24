@@ -49,9 +49,11 @@ const (
 	uuCmdKeepalive = 4
 	uuPktVerGCM    = 2
 
-	uuMaxRounds   = 12
-	uuRoundGap    = 1500 * time.Millisecond
-	uuStallRounds = 3
+	// 一次 /v3/acc 给 449 个节点，够用一个多小时；拉得太猛反而触发软限流
+	// （实测连拉时出现过 EOF）。所以每轮只拉两次，节奏交给上层定时器。
+	uuMaxRounds   = 2
+	uuRoundGap    = 800 * time.Millisecond
+	uuStallRounds = 1
 )
 
 // uuHeadersJSON 是设备指纹头（真机导出），改 EAD/Model 会被风控。

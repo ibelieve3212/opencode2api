@@ -337,6 +337,33 @@ func (p *Pool) HealthCount() int {
 	return n
 }
 
+// Forget 把一个出口从总池和所有状态里彻底删掉。UU 的节点是一次性的：
+// 探不通就是已经过期，留在坏池里睡 24 小时没有任何意义。
+func (p *Pool) Forget(ip string) {
+	p.mu.Lock()
+	delete(p.master, ip)
+	delete(p.health, ip)
+	delete(p.cool, ip)
+	delete(p.buffer, ip)
+	delete(p.dead, ip)
+	delete(p.inFlight, ip)
+	p.masterVer++
+	p.mu.Unlock()
+}
+
+// HealthCountByKind 统计某类出口在健康池里的数量，用于按需补货。
+func (p *Pool) HealthCountByKind(k Kind) int {
+	p.mu.Lock()
+	n := 0
+	for _, e := range p.health {
+		if e != nil && e.Kind == k {
+			n++
+		}
+	}
+	p.mu.Unlock()
+	return n
+}
+
 // InFlight 返回正在探测中的出口数。
 func (p *Pool) InFlight() int {
 	p.mu.Lock()
