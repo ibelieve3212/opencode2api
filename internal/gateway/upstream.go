@@ -1433,7 +1433,7 @@ func withAnthropicBeta(endpoint string) string {
 	return parsed.String()
 }
 
-// setV1Headers renders the v1 lane's header set, that of an OpenCode 1.19.3
+// setV1Headers renders the v1 lane's header set, that of an OpenCode 1.19.6
 // model request on its opencode provider, as captured from the official
 // release: the AI SDK User-Agent of the package serving the protocol, both
 // session headers, the user message id as x-opencode-request (a fresh
@@ -1589,7 +1589,7 @@ var v1AnthropicToolBetas = map[string]string{
 	"advisor_20260301":        "advisor-tool-2026-03-01",
 }
 
-// v1AnthropicBetas returns the anthropic-beta value OpenCode 1.19.3 sends
+// v1AnthropicBetas returns the anthropic-beta value OpenCode 1.19.6 sends
 // with a Messages body on the v1 lane, or "" when no flag applies. Its
 // opencode provider sets no fixed betas: the AI SDK derives them from the
 // request features (body features first, then tools, in the SDK's order), and
