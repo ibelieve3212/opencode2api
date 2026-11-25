@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -33,29 +34,101 @@ func TestDeadBackoffLadder(t *testing.T) {
 	}
 }
 
-// 上游明确给了 Retry-After，就照它等：被 QuotaFallback 钳短只会反复重撞同一道墙。
-func TestQuotaResetHonoursRetryAfter(t *testing.T) {
+// 429 不是"这个出口当天没额度了"：同一个出口隔两秒重问就 200，报文里的
+// Retry-After 说的是上游那个没额度的后端。所以判决里不许再带"该睡到什么时候"，
+// 冷却时长一律按阶梯给。
+func TestQuotaLadderIgnoresRetryAfter(t *testing.T) {
 	cfg := DefaultConfig()
-	res := gateway.ExitProbeResult{Status: 429, RetryAfter: 20 * time.Hour}
+	cfg.QuotaBackoff = 2 * time.Minute
+	cfg.QuotaTTL = 6 * time.Hour
+	p, err := New(cfg, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &Exit{IP: "203.0.113.9", Port: 6300, Kind: KindExt}
 
-	got := Classify(res, cfg).Reset.Sub(time.Now())
-	if got < 19*time.Hour {
-		t.Fatalf("Retry-After 20h 应被采信，实际只等 %s", got.Round(time.Minute))
+	v := Classify(gateway.ExitProbeResult{Status: 429, RetryAfter: 20 * time.Hour}, cfg)
+	if v.Kind != "quota" {
+		t.Fatalf("429 应判 quota，实际 %q", v.Kind)
+	}
+	// 上游的 20 小时只该出现在日志里，不该变成压制时长。
+	if !strings.Contains(v.Reason, "仅作参考") {
+		t.Fatalf("上游的 Retry-After 只该记成参考信息，实际 %q", v.Reason)
+	}
+
+	want := []time.Duration{
+		2 * time.Minute, 8 * time.Minute, 32 * time.Minute,
+		128 * time.Minute, 6 * time.Hour, 6 * time.Hour,
+	}
+	for i, w := range want {
+		got := p.Cool(e).Sub(time.Now())
+		if d := got - w; d > time.Minute || d < -time.Minute {
+			t.Fatalf("第 %d 次撞 429 应压 %s，实际 %s", i+1, w, got.Round(time.Second))
+		}
+	}
+
+	// 探通了就说明那次 429 是抽签抽输的，阶梯也得从头算。
+	p.Admit(e)
+	if got := p.Cool(e).Sub(time.Now()); got > 8*time.Minute {
+		t.Fatalf("探通后再撞 429 应从第一级重来，实际 %s", got.Round(time.Second))
 	}
 }
 
-// 上游什么都没说时才退回兜底，且荒谬值要钳到一天。
-func TestQuotaResetFallbackAndCap(t *testing.T) {
+// 探通一次就是一个真实请求，会吃掉出口当天的免费额度。额度用完就必须停止复验，
+// 否则 15 分钟一轮的租约复验会把它一天的额度全烧在门槛自己身上。
+func TestProbeBudgetStopsRecheck(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.ProbeBudget = 3
+	p, err := New(cfg, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &Exit{IP: "203.0.113.7", Port: 6300, Kind: KindExt}
+	p.UpsertMaster(e)
 
-	got := Classify(gateway.ExitProbeResult{Status: 429}, cfg).Reset.Sub(time.Now())
-	if d := got - cfg.QuotaFallback; d > time.Minute || d < -time.Minute {
-		t.Fatalf("没有信号的 429 应等兜底 %s，实际 %s", cfg.QuotaFallback, got.Round(time.Second))
+	for i := 0; i < cfg.ProbeBudget; i++ {
+		p.BurnProbe(e.IP)
+	}
+	if left := p.ProbeLeft(e.IP); left != 0 {
+		t.Fatalf("烧完预算后应剩 0 次，实际 %d", left)
+	}
+	if got := p.candidates(4, time.Now(), false); len(got) != 0 {
+		t.Fatalf("预算用完的出口不该再被取样，实际取了 %d 个", len(got))
 	}
 
-	huge := gateway.ExitProbeResult{Status: 429, RetryAfter: 72 * time.Hour}
-	got = Classify(huge, cfg).Reset.Sub(time.Now())
-	if got > maxQuotaHold+time.Minute {
-		t.Fatalf("荒谬的 Retry-After 应钳到 %s，实际 %s", maxQuotaHold, got.Round(time.Hour))
+	// 出租约也不能把它捞回来复验：留在健康池继续供货，到 08:00 重置再说。
+	p.Admit(e)
+	p.lease[e.Token()] = time.Now().Add(-time.Second)
+	if exp := p.ExpireLeases(time.Now()); len(exp) != 0 {
+		t.Fatalf("预算用完的出口不该被退租，实际退了 %d 个", len(exp))
+	}
+	want := NextReset(time.Now(), cfg.ResetHour)
+	if got := p.lease[e.Token()]; !got.After(want.Add(-time.Minute)) {
+		t.Fatalf("租约应续到重置点 %s，实际 %s", want.Format(time.DateTime), got.Format(time.DateTime))
+	}
+}
+
+// 额度日翻页（08:00）后预算重新给满，出口重新可探。
+func TestProbeBudgetResetsNextDay(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ProbeBudget = 2
+	p, err := New(cfg, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &Exit{IP: "203.0.113.8", Port: 6300, Kind: KindExt}
+	p.BurnProbe(e.IP)
+	p.BurnProbe(e.IP)
+	if !p.probeSpentLocked(e.IP) {
+		t.Fatal("烧完预算后应判为已用完")
+	}
+	p.mu.Lock()
+	p.probeDay = "1970-01-01" // 假装已经翻页
+	p.mu.Unlock()
+	if !p.probeSpentLocked(e.IP) {
+		t.Fatal("未翻页前不该清空")
+	}
+	if left := p.ProbeLeft(e.IP); left != cfg.ProbeBudget {
+		t.Fatalf("翻页后预算应恢复 %d，实际 %d", cfg.ProbeBudget, left)
 	}
 }

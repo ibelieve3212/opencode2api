@@ -24,9 +24,17 @@ type Config struct {
 	BufferStrikes int           // 同类错误累计几次升级坏池
 	DeadBackoff   time.Duration // 坏池第一次沉睡时长，每再判死一次延长 4 倍
 	DeadTTL       time.Duration // 坏池沉睡上限
-	QuotaFallback time.Duration // 上游没给重置时刻时的兜底冷却
+	QuotaBackoff  time.Duration // 429 第一次压多久，每再撞一次延长 4 倍
+	QuotaTTL      time.Duration // 429 压制时长上限
 	ResetHour     int           // 每日额度重置的小时（北京时间 8）
 	HealthLease   time.Duration // 健康池租约：探通只是"上次探通"，不是永久可用
+	// ProbeBudget 是同一个出口每天最多被门槛探通几次（0 = 不限）。
+	//
+	// 探通一次就是打一个真实请求，会实打实吃掉出口当天的免费额度。实测一个出口
+	// 一天的额度只有个位数次成功请求，而 15 分钟一轮的复验一天要探它 90 多次——
+	// 额度在复验里就被烧光了，真实用户过来只能拿到 429。这不是"探得不够"，是
+	// 探得太多：用完预算的出口继续留在健康池里供货，到 08:00 重置后才复验。
+	ProbeBudget int
 }
 
 // DefaultConfig 与 Python 版线上参数一致。
@@ -37,9 +45,11 @@ func DefaultConfig() Config {
 		BufferStrikes: 3,
 		DeadBackoff:   15 * time.Minute,
 		DeadTTL:       24 * time.Hour,
-		QuotaFallback: 3 * time.Hour,
+		QuotaBackoff:  2 * time.Minute,
+		QuotaTTL:      6 * time.Hour,
 		ResetHour:     8,
 		HealthLease:   15 * time.Minute,
+		ProbeBudget:   3,
 	}
 }
 
@@ -69,11 +79,15 @@ type Pool struct {
 	buffer   map[string]*Hold     // 缓冲池
 	dead     map[string]time.Time // 坏池
 	deadN    map[string]int       // 坏池：该 ip 连续被判死了几次，用来算退避
+	quotaN   map[string]int       // 冷却池：该 ip 连续撞了几次 429，用来算退避
+	probeN   map[string]int       // 该 ip 今天被探通了几次（= 烧掉几个额度）
+	probeDay string               // probeN/quotaN 属于哪个额度日（到点整体清零）
 	lease    map[string]time.Time // 健康池租约：token -> 到期
 	inFlight map[string]bool      // 正在探测的 ip
 	idx      int
 	stats    Stats
 	migrated int // 启动时被压回第一级的坏池条目数（老版本固定 24h 迁移）
+	migCool  int // 启动时被压回第一级的冷却条目数（老版本按 Retry-After 睡到 08:00）
 
 	// 候选列表缓存：主池上万条时，每次取候选都整体排序会让 96 个探针把锁抢死。
 	// 只在主池变动（masterVer 变化）时重建一次。
@@ -95,6 +109,8 @@ func New(cfg Config, dir string) (*Pool, error) {
 		buffer:   map[string]*Hold{},
 		dead:     map[string]time.Time{},
 		deadN:    map[string]int{},
+		quotaN:   map[string]int{},
+		probeN:   map[string]int{},
 		lease:    map[string]time.Time{},
 		inFlight: map[string]bool{},
 		dir:      dir,
@@ -110,6 +126,9 @@ func (p *Pool) Config() Config { return p.cfg }
 
 // Migrated 报告本次启动把多少个旧版坏池条目压回第一级退避。
 func (p *Pool) Migrated() int { return p.migrated }
+
+// MigratedCool 报告本次启动把多少个按 Retry-After 睡到 08:00 的冷却条目压回第一级。
+func (p *Pool) MigratedCool() int { return p.migCool }
 
 // ---------- 状态转移 ----------
 
@@ -148,27 +167,48 @@ func (p *Pool) Admit(e *Exit) bool {
 	// 探通了就说明之前的"连不上"是暂时的，退避阶梯从头算：否则一个刚被冤枉
 	// 过的出口会一直背着最长的沉睡时长。
 	delete(p.deadN, e.IP)
+	delete(p.quotaN, e.IP)
 	p.stats.Healthy++
 	return true
 }
 
-// Cool 把出口放冷却池直到额度重置。
-func (p *Pool) Cool(e *Exit, until time.Time) time.Time {
+// Cool 把出口压进冷却池，按"连续撞 429 次数"走阶梯退避。
+func (p *Pool) Cool(e *Exit) time.Time {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.rollDayLocked()
 	p.dropHealthLocked(e.IP)
 	// 一个出口同一时刻只能待在一个"不予派发"的池子里。否则它会被两个计时器
-	// 同时压着，按最长那个算：本该 08:00 回冷却结束的出口，会被残留的坏池
-	// 记录多扣一整天，产能白丢；到点后还会被不同池子各验一遍，白烧额度。
+	// 同时压着，按最长那个算：本该早点回来的出口，会被残留的坏池记录多扣一天，
+	// 产能白丢；到点后还会被不同池子各验一遍，白烧额度。
 	delete(p.buffer, e.IP)
 	delete(p.dead, e.IP)
-	if until.IsZero() {
-		until = NextReset(time.Now(), p.cfg.ResetHour)
-	}
+	until := p.quotaUntilLocked(e.IP)
 	if prev, ok := p.cool[e.IP]; !ok || until.After(prev) {
 		p.cool[e.IP] = until
 	}
 	return until
+}
+
+// quotaUntilLocked 算这个出口这次该压多久，并把它的"连续撞 429 次数"加一。
+//
+// 429 不等于这个出口当天没额度了：同一个出口隔两秒重问就 200，响应里的 id 还
+// 有两种形态，说明上游是多个后端在轮着接、撞上没额度的那个才回 429。以前按报文
+// 里的 Retry-After（实测约 19 小时）把出口睡到第二天 08:00，于是一轮 429 就能让
+// 上千个还能用的出口集体下线——2026-11-25 那 172 个就是这么来的。
+//
+// 改成 2m → 8m → 32m → … 的阶梯：撞得越连续压得越久，真没额度的自然爬到上限，
+// 假 429 的两分钟就回来。重试和新退避都只消耗 429（不动额度），所以代价只有时间。
+func (p *Pool) quotaUntilLocked(ip string) time.Time {
+	p.quotaN[ip]++
+	hold := p.cfg.QuotaBackoff
+	for i := 1; i < p.quotaN[ip] && hold < p.cfg.QuotaTTL; i++ {
+		hold *= 4
+	}
+	if hold > p.cfg.QuotaTTL {
+		hold = p.cfg.QuotaTTL
+	}
+	return time.Now().Add(hold)
 }
 
 // Buffer 把出口压进缓冲池，同类错误累计到阈值就升级坏池。
@@ -234,8 +274,51 @@ func (p *Pool) DropHealth(ip string) {
 	p.dropHealthLocked(ip)
 }
 
-// QuotaDemote 是"真流量撞 429"的路径：直接进冷却池。
-func (p *Pool) QuotaDemote(e *Exit) time.Time { return p.Cool(e, time.Time{}) }
+// QuotaDemote 是"真流量撞 429"的路径：直接进冷却池走阶梯。
+func (p *Pool) QuotaDemote(e *Exit) time.Time { return p.Cool(e) }
+
+// quotaDay 把时刻归到它所属的"额度日"：免费额度每天 08:00 重置，所以 07:59 和
+// 08:01 分属两天。用日期串当键，跨天时把按天累计的计数整体清掉。
+func quotaDay(t time.Time, resetHour int) string {
+	return t.Add(-time.Duration(resetHour) * time.Hour).Format("2006-01-02")
+}
+
+// rollDayLocked 在额度日翻页时清空"今天的"计数。
+func (p *Pool) rollDayLocked() {
+	day := quotaDay(time.Now(), p.cfg.ResetHour)
+	if p.probeDay == day {
+		return
+	}
+	p.probeDay = day
+	p.probeN = map[string]int{}
+	p.quotaN = map[string]int{}
+}
+
+// BurnProbe 记这个出口今天又被探通了一次。探通就是打了一个真实请求，会吃掉它
+// 当天的免费额度，所以这个数就是"烧掉了几个额度"。
+func (p *Pool) BurnProbe(ip string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.rollDayLocked()
+	p.probeN[ip]++
+}
+
+// ProbeLeft 返回这个出口今天还剩几次探针额度。
+func (p *Pool) ProbeLeft(ip string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.rollDayLocked()
+	left := p.cfg.ProbeBudget - p.probeN[ip]
+	if p.cfg.ProbeBudget <= 0 || left < 0 {
+		return 0
+	}
+	return left
+}
+
+// probeSpentLocked 报告这个出口今天的探针额度是否已经用完。
+func (p *Pool) probeSpentLocked(ip string) bool {
+	return p.cfg.ProbeBudget > 0 && p.probeN[ip] >= p.cfg.ProbeBudget
+}
 
 func (p *Pool) dropHealthLocked(ip string) {
 	for tok, cur := range p.health {
@@ -255,9 +338,16 @@ func (p *Pool) dropHealthLocked(ip string) {
 func (p *Pool) ExpireLeases(now time.Time) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.rollDayLocked()
 	var expired []string
 	for tok, until := range p.lease {
 		if until.After(now) {
+			continue
+		}
+		// 今天的探针额度已经用完：再探一次既不会更准，还会把出口最后一点免费
+		// 额度烧掉。留在健康池里继续供货，到 08:00 重置后再复验。
+		if e := p.health[tok]; e != nil && p.probeSpentLocked(e.IP) {
+			p.lease[tok] = NextReset(now, p.cfg.ResetHour)
 			continue
 		}
 		delete(p.lease, tok)
@@ -395,6 +485,11 @@ func (p *Pool) candidates(limit int, now time.Time, randomStart bool) []*Exit {
 		if _, ok := p.health[e.Token()]; ok {
 			continue
 		}
+		// 今天已经探通过 ProbeBudget 次：它当天的免费额度基本被门槛自己烧光了，
+		// 再拿它过门槛只会重复烧。等 08:00 重置后再算。
+		if p.probeSpentLocked(ip) {
+			continue
+		}
 		p.inFlight[ip] = true
 		out = append(out, e.Clone())
 	}
@@ -420,6 +515,8 @@ func (p *Pool) Forget(ip string) {
 	delete(p.buffer, ip)
 	delete(p.dead, ip)
 	delete(p.deadN, ip)
+	delete(p.quotaN, ip)
+	delete(p.probeN, ip)
 	delete(p.inFlight, ip)
 	p.masterVer++
 	p.mu.Unlock()
@@ -492,6 +589,8 @@ func (p *Pool) UpsertMaster(e *Exit) (added bool, refreshed bool) {
 		delete(p.cool, e.IP)
 		delete(p.dead, e.IP)
 		delete(p.deadN, e.IP)
+		delete(p.quotaN, e.IP)
+		delete(p.probeN, e.IP)
 		return false, true
 	}
 	if e.ExpireAt != 0 {
@@ -512,6 +611,8 @@ func (p *Pool) PruneExpired(now time.Time) int {
 			delete(p.cool, ip)
 			delete(p.dead, ip)
 			delete(p.deadN, ip)
+			delete(p.quotaN, ip)
+			delete(p.probeN, ip)
 			p.masterVer++
 			n++
 		}
@@ -597,6 +698,14 @@ type persistExt struct {
 	Exits     map[string]*Exit `json:"exits"`
 }
 
+// persistDaily 是按天累计的两个计数：撞了几次 429、被探通了几次。都按额度日
+// （08:00 翻页）算，所以带上日期；日期对不上就当没有，整体从头累计。
+type persistDaily struct {
+	Day   string         `json:"day"`
+	Quota map[string]int `json:"quota"`
+	Probe map[string]int `json:"probe"`
+}
+
 func (p *Pool) saveJSON(name string, v any) {
 	tmp := filepath.Join(p.dir, name+".tmp")
 	data, err := json.Marshal(v)
@@ -636,6 +745,13 @@ func (p *Pool) Save() {
 	for ip, n := range p.deadN {
 		deadN[ip] = n
 	}
+	daily := persistDaily{Day: p.probeDay, Quota: map[string]int{}, Probe: map[string]int{}}
+	for ip, n := range p.quotaN {
+		daily.Quota[ip] = n
+	}
+	for ip, n := range p.probeN {
+		daily.Probe[ip] = n
+	}
 	buf := make(map[string]*Hold, len(p.buffer))
 	for ip, h := range p.buffer {
 		buf[ip] = h
@@ -646,6 +762,7 @@ func (p *Pool) Save() {
 	p.saveJSON("pool-cool.json", cool)
 	p.saveJSON("pool-dead.json", dead)
 	p.saveJSON("pool-dead-n.json", deadN)
+	p.saveJSON("pool-daily.json", daily)
 	p.saveJSON("pool-buffer.json", buf)
 }
 
@@ -688,6 +805,31 @@ func (p *Pool) load() {
 		}
 		if n > 0 {
 			p.migrated = n
+		}
+	}
+	var daily persistDaily
+	if p.loadJSON("pool-daily.json", &daily) && daily.Day == quotaDay(time.Now(), p.cfg.ResetHour) {
+		for ip, n := range daily.Quota {
+			p.quotaN[ip] = n
+		}
+		for ip, n := range daily.Probe {
+			p.probeN[ip] = n
+		}
+		p.probeDay = daily.Day
+	}
+	if p.probeDay == "" {
+		// 没有按天计数就说明冷却时间戳还是老版本按 Retry-After 写的（实测约 19
+		// 小时，一律睡到第二天 08:00）。那不是这个出口的额度用完，只是它有一次
+		// 撞上了没额度的后端。压回第一级，几分钟后重新过门槛。
+		now, n := time.Now(), 0
+		for ip, t := range p.cool {
+			if t.After(now.Add(p.cfg.QuotaBackoff)) {
+				p.cool[ip] = now.Add(p.cfg.QuotaBackoff)
+				n++
+			}
+		}
+		if n > 0 {
+			p.migCool = n
 		}
 	}
 	var buf map[string]*Hold

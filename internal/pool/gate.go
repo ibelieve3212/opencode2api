@@ -33,12 +33,7 @@ type Verdict struct {
 	Note    string // 缓冲池/坏池的错误分类
 	Reason  string // 人类可读原因
 	Latency time.Duration
-	Reset   time.Time
 }
-
-// maxQuotaHold 是 429 解封时刻的荒谬值上限。免费额度按天重置，任何"再等 30 天"
-// 的说法都只可能是上游算错，钳到一天正好覆盖最长的那个窗口。
-const maxQuotaHold = 24 * time.Hour
 
 // Classify 把上游/传输结果归类。
 func Classify(res gateway.ExitProbeResult, cfg Config) Verdict {
@@ -48,21 +43,16 @@ func Classify(res gateway.ExitProbeResult, cfg Config) Verdict {
 		v.Kind, v.Reason = "healthy", "真实请求 200"
 	case res.Status == 429:
 		v.Kind, v.Reason = "quota", "429 额度墙"
-		// 解封时刻按可信度取：Retry-After 头 > 报文正文的绝对时刻 > 兜底。
-		// 上游既然明确说了还要等多久，就照它等：把它钳到 QuotaFallback 只会让
-		// 出口在封条还贴着的时候被反复叫醒、重探、再撞一次 429，白白占掉探针
-		// 预算。只有"上游什么都没说"时才用兜底值，而兜底值本身才需要钳制。
-		trusted := false
-		if res.RetryAfter > 0 {
-			v.Reset, trusted = time.Now().Add(res.RetryAfter), true
-		} else if r := parseQuotaReset(res.Body, time.Now()); !r.IsZero() {
-			v.Reset, trusted = r, true
-		}
-		if !trusted {
-			v.Reset = time.Now().Add(cfg.QuotaFallback)
-		} else if limit := time.Now().Add(maxQuotaHold); v.Reset.After(limit) {
-			// 只留一个荒谬值兜底：免费额度最长也就到下一个 08:00 重置。
-			v.Reset = limit
+		// 429 不等于这个出口当天没额度了：同一个出口隔两秒重问就 200，报文里的 id
+		// 还有两种形态（UUID 形与 gen- 形），说明上游是多个后端在轮着接、撞上没
+		// 额度的那个才回 429。报文里的 Retry-After（实测约 19 小时）说的是那个后端
+		// 的窗口，不是这个出口的，采信它等于把可用出口白睡一天——2026-11-25 那
+		// 172 个睡到 08:00 的出口就是这么来的。这里只把上游的说法记进日志备查，
+		// 压多久交给 Pool 的 429 阶梯。
+		if hint := res.RetryAfter; hint > 0 {
+			v.Reason += "（上游称 " + hint.Round(time.Minute).String() + " 后重置，仅作参考）"
+		} else if hint := parseQuotaReset(res.Body, time.Now()); !hint.IsZero() {
+			v.Reason += "（上游称 " + time.Until(hint).Round(time.Minute).String() + " 后重置，仅作参考）"
 		}
 	case res.Status == 401 || res.Status == 403:
 		v.Kind, v.Note, v.Reason = "buffered", "auth", "认证/形状不符"
@@ -96,7 +86,12 @@ type Gate struct {
 	Target      int           // >0 时健康池达标就停止取样；0 = 一直扫
 	Sample      int           // 每轮取样出口数；0 = 按健康池缺口自动算
 	Pause       time.Duration // 两轮之间的间隔
-	Log         func(format string, args ...any)
+	// Attempts 是同一个出口在判死前最多问几次（拿到非 429 立即停），RetryGap 是
+	// 每次之间的间隔。429 是上游按后端随机给的，隔两秒换条连接就有机会 200；
+	// 重试只消耗 429（不出 token、不扣额度），所以代价只有时间。
+	Attempts int
+	RetryGap time.Duration
+	Log      func(format string, args ...any)
 	// ProbeURL 返回探测该出口时使用的代理地址。变体协议不能直连拨号，
 	// 必须经池子自己的 token 代理转发。留空则退回 e.ProxyURL()。
 	ProbeURL func(e *Exit) string
@@ -233,19 +228,29 @@ func (g *Gate) modelOrder() []string {
 
 func (g *Gate) probe(ctx context.Context, e *Exit) {
 	order := g.modelOrder()
+	tries := g.Attempts
+	if tries < 1 {
+		tries = 1
+	}
 	var v Verdict
 	allQuota := true
-	for _, model := range order {
-		v = Classify(g.probeOnce(ctx, e, model), g.Pool.Config())
+	for i := 0; i < tries; i++ {
+		if i > 0 && !sleepCtx(ctx, g.RetryGap) {
+			break
+		}
+		// 每轮换下一个模型：429 可能是这个出口没额度，也可能是这个模型没额度，
+		// 轮着问才不会让一个的额度给整池判死；轮完就从头再来，隔开两秒给上游
+		// 的负载均衡一次换后端的机会。
+		v = Classify(g.probeOnce(ctx, e, order[i%len(order)]), g.Pool.Config())
 		if v.Kind != "quota" {
 			allQuota = false
 			break
 		}
-		// 429 未必是这个出口没额度：也可能是探针用的那个模型没额度。
-		// 换下一个模型再问一次，别让一个模型的额度给整池判死。
-		if ctx.Err() != nil {
-			break
-		}
+	}
+	if ctx.Err() != nil {
+		// 被关停/超时打断的探测没有结论，别拿半次抽样给出口定性。
+		g.Pool.FinishProbe(e.IP)
+		return
 	}
 	switched := g.noteWall(allQuota)
 	if switched != "" {
@@ -295,6 +300,9 @@ func (g *Gate) noteWall(allQuota bool) string {
 func (g *Gate) apply(e *Exit, v Verdict) {
 	switch v.Kind {
 	case "healthy":
+		// 探通一次就是一个真实请求，出口当天的免费额度少一格。记下来，用完预算
+		// 就别再拿它复验了——额度过早被门槛烧光是真实用户 429 的根因。
+		g.Pool.BurnProbe(e.IP)
 		if g.Pool.Admit(e) {
 			st := g.Pool.Snapshot()
 			g.log("+ 健康池：%s <- %s（%s，%dms，租约 %s，在册 %d/%d）",
@@ -302,7 +310,7 @@ func (g *Gate) apply(e *Exit, v Verdict) {
 				g.Pool.Config().HealthLease, st.Health, g.Target)
 		}
 	case "quota":
-		until := g.Pool.Cool(e, v.Reset)
+		until := g.Pool.Cool(e)
 		g.log("- 冷却池：%s %s，待到 %s", e.Token(), v.Reason,
 			until.Format("01-02 15:04"))
 	case "buffered":

@@ -27,8 +27,15 @@ func parseFlags() options {
 	flag.DurationVar(&o.samplePause, "sample-pause", 20*time.Second, "两轮取样之间的间隔")
 	flag.DurationVar(&o.healthLease, "health-lease", 15*time.Minute,
 		"健康池租约：探通的出口多久后回候选复验（0 = 不复验）")
-	flag.DurationVar(&o.quotaFallback, "quota-fallback", 3*time.Hour,
-		"429 报文没给解封时刻时的兜底冷却")
+	flag.DurationVar(&o.quotaBackoff, "quota-backoff", 2*time.Minute,
+		"429 第一次压多久，每再撞一次延长 4 倍，到 -quota-ttl 封顶")
+	flag.DurationVar(&o.quotaTTL, "quota-ttl", 6*time.Hour, "429 压制时长上限")
+	flag.IntVar(&o.quotaAttempts, "quota-attempts", 3,
+		"同一出口判死前最多问几次：拿到非 429 立即停（429 不出 token、不扣额度，重试只花时间）")
+	flag.DurationVar(&o.quotaGap, "quota-gap", 2*time.Second,
+		"同一出口两次尝试之间的间隔（实测隔两秒，同一出口的 429 会变 200）")
+	flag.IntVar(&o.probeBudget, "probe-budget", 3,
+		"同一出口每天最多被探通几次：探通即消耗出口额度，用完就留池供货、到 08:00 再复验（0=不限）")
 	flag.StringVar(&o.gateURL, "gate-url",
 		"https://opencode.ai/inference", "门槛上游基址")
 	flag.DurationVar(&o.refresh, "refresh-interval", 10*time.Minute, "渠道保鲜间隔")

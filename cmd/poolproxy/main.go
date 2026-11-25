@@ -45,7 +45,11 @@ type options struct {
 	sample        int
 	samplePause   time.Duration
 	healthLease   time.Duration
-	quotaFallback time.Duration
+	quotaBackoff  time.Duration
+	quotaTTL      time.Duration
+	quotaAttempts int
+	quotaGap      time.Duration
+	probeBudget   int
 	gateURL       string
 	refresh       time.Duration
 	refreshBatch  int
@@ -64,7 +68,9 @@ func run(o options) error {
 	cfg.BufferStrikes = o.bufferStrike
 	cfg.DeadBackoff = o.deadBackoff
 	cfg.DeadTTL = o.deadTTL
-	cfg.QuotaFallback = o.quotaFallback
+	cfg.QuotaBackoff = o.quotaBackoff
+	cfg.QuotaTTL = o.quotaTTL
+	cfg.ProbeBudget = o.probeBudget
 	cfg.HealthLease = o.healthLease
 
 	if err := os.MkdirAll(o.stateDir, 0o755); err != nil {
@@ -81,6 +87,10 @@ func run(o options) error {
 	if n := p.Migrated(); n > 0 {
 		log.Printf("坏池迁移：%d 个旧版固定 24h 条目压回第一级 %s，将提前复验",
 			n, cfg.DeadBackoff)
+	}
+	if n := p.MigratedCool(); n > 0 {
+		log.Printf("冷却迁移：%d 个按 Retry-After 睡到 08:00 的条目压回第一级 %s"+
+			"（429 不等于当天没额度，换条连接重问就可能 200）", n, cfg.QuotaBackoff)
 	}
 
 	ch, err := pool.NewChannels(o.channelsFile)
@@ -102,6 +112,7 @@ func run(o options) error {
 		BaseURL: o.gateURL, Models: o.probeModels,
 		Timeout: o.probeTimeout, Concurrency: o.conc, Target: target,
 		Sample: o.sample, Pause: o.samplePause,
+		Attempts: o.quotaAttempts, RetryGap: o.quotaGap,
 		Log: log.Printf,
 		// 变体协议（雷神/UU）不能按出口直连拨号，统一经池子自己的 token 代理。
 		ProbeURL: func(e *pool.Exit) string {
@@ -110,8 +121,11 @@ func run(o options) error {
 	}
 	go gate.Run(ctx)
 	log.Printf("准入门槛：%d 并发进程内探测（bun 指纹，与 2api 同源），目标健康池 %d，"+
-		"探针模型 %v，租约 %s，抽样间隔 %s",
-		o.conc, target, o.probeModels, o.healthLease, o.samplePause)
+		"探针模型 %v，租约 %s，抽样间隔 %s", o.conc, target, o.probeModels,
+		o.healthLease, o.samplePause)
+	log.Printf("429 消化：同一出口先问 %d 次、间隔 %s 才判死；冷却阶梯 %s 起每次 ×4、封顶 %s；"+
+		"每个出口每天最多探通 %d 次", o.quotaAttempts, o.quotaGap, o.quotaBackoff,
+		o.quotaTTL, o.probeBudget)
 
 	// 下游端口
 	ls := &pool.Listener{Pool: p, Log: log.Printf, Host: o.exportHost}
