@@ -22,7 +22,8 @@ type Config struct {
 	HealthTarget  int           // 健康池目标数量
 	BufferHold    time.Duration // 缓冲池压多久
 	BufferStrikes int           // 同类错误累计几次升级坏池
-	DeadTTL       time.Duration // 坏池睡多久再体检
+	DeadBackoff   time.Duration // 坏池第一次沉睡时长，每再判死一次延长 4 倍
+	DeadTTL       time.Duration // 坏池沉睡上限
 	QuotaFallback time.Duration // 上游没给重置时刻时的兜底冷却
 	ResetHour     int           // 每日额度重置的小时（北京时间 8）
 	HealthLease   time.Duration // 健康池租约：探通只是"上次探通"，不是永久可用
@@ -34,6 +35,7 @@ func DefaultConfig() Config {
 		HealthTarget:  200,
 		BufferHold:    10 * time.Minute,
 		BufferStrikes: 3,
+		DeadBackoff:   15 * time.Minute,
 		DeadTTL:       24 * time.Hour,
 		QuotaFallback: 3 * time.Hour,
 		ResetHour:     8,
@@ -66,10 +68,12 @@ type Pool struct {
 	cool     map[string]time.Time // 冷却池：ip -> 到期
 	buffer   map[string]*Hold     // 缓冲池
 	dead     map[string]time.Time // 坏池
+	deadN    map[string]int       // 坏池：该 ip 连续被判死了几次，用来算退避
 	lease    map[string]time.Time // 健康池租约：token -> 到期
 	inFlight map[string]bool      // 正在探测的 ip
 	idx      int
 	stats    Stats
+	migrated int // 启动时被压回第一级的坏池条目数（老版本固定 24h 迁移）
 
 	// 候选列表缓存：主池上万条时，每次取候选都整体排序会让 96 个探针把锁抢死。
 	// 只在主池变动（masterVer 变化）时重建一次。
@@ -90,6 +94,7 @@ func New(cfg Config, dir string) (*Pool, error) {
 		cool:     map[string]time.Time{},
 		buffer:   map[string]*Hold{},
 		dead:     map[string]time.Time{},
+		deadN:    map[string]int{},
 		lease:    map[string]time.Time{},
 		inFlight: map[string]bool{},
 		dir:      dir,
@@ -102,6 +107,9 @@ func New(cfg Config, dir string) (*Pool, error) {
 }
 
 func (p *Pool) Config() Config { return p.cfg }
+
+// Migrated 报告本次启动把多少个旧版坏池条目压回第一级退避。
+func (p *Pool) Migrated() int { return p.migrated }
 
 // ---------- 状态转移 ----------
 
@@ -137,6 +145,9 @@ func (p *Pool) Admit(e *Exit) bool {
 	delete(p.cool, e.IP)
 	delete(p.buffer, e.IP)
 	delete(p.dead, e.IP)
+	// 探通了就说明之前的"连不上"是暂时的，退避阶梯从头算：否则一个刚被冤枉
+	// 过的出口会一直背着最长的沉睡时长。
+	delete(p.deadN, e.IP)
 	p.stats.Healthy++
 	return true
 }
@@ -174,9 +185,10 @@ func (p *Pool) Buffer(e *Exit, kind string) (until time.Time, killed bool) {
 	}
 	if strikes >= p.cfg.BufferStrikes {
 		delete(p.buffer, e.IP)
-		p.dead[e.IP] = time.Now().Add(p.cfg.DeadTTL)
+		until = p.deadUntilLocked(e.IP)
+		p.dead[e.IP] = until
 		p.stats.Killed++
-		return time.Time{}, true
+		return until, true
 	}
 	until = time.Now().Add(p.cfg.BufferHold)
 	p.buffer[e.IP] = &Hold{Until: until, N: strikes, Kind: kind}
@@ -191,10 +203,28 @@ func (p *Pool) Kill(e *Exit) time.Time {
 	p.dropHealthLocked(e.IP)
 	delete(p.buffer, e.IP)
 	delete(p.cool, e.IP)
-	until := time.Now().Add(p.cfg.DeadTTL)
+	until := p.deadUntilLocked(e.IP)
 	p.dead[e.IP] = until
 	p.stats.Killed++
 	return until
+}
+
+// deadUntilLocked 算这个出口这次该死多久，并把它"连续判死次数"加一。
+//
+// 固定 24 小时的问题：面板掐源 IP、链路抖动、对端刚重启都会先表现为"连不上"，
+// 一次抖动就把出口按死一整天，等于池子自己在扔产能——2026-11-25 的坏池一度
+// 堆到总池的 70%，基本就是这么来的。改成一个 15m → 1h → 4h → 16h → 24h 的
+// 阶梯：真死的一分钟就能确认，假死的十几分钟内就回来。
+func (p *Pool) deadUntilLocked(ip string) time.Time {
+	p.deadN[ip]++
+	hold := p.cfg.DeadBackoff
+	for i := 1; i < p.deadN[ip] && hold < p.cfg.DeadTTL; i++ {
+		hold *= 4
+	}
+	if hold > p.cfg.DeadTTL {
+		hold = p.cfg.DeadTTL
+	}
+	return time.Now().Add(hold)
 }
 
 // DropHealth 把出口移出健康池（转发失败等），不改变其它池的结论。
@@ -389,6 +419,7 @@ func (p *Pool) Forget(ip string) {
 	delete(p.cool, ip)
 	delete(p.buffer, ip)
 	delete(p.dead, ip)
+	delete(p.deadN, ip)
 	delete(p.inFlight, ip)
 	p.masterVer++
 	p.mu.Unlock()
@@ -460,6 +491,7 @@ func (p *Pool) UpsertMaster(e *Exit) (added bool, refreshed bool) {
 		delete(p.buffer, e.IP)
 		delete(p.cool, e.IP)
 		delete(p.dead, e.IP)
+		delete(p.deadN, e.IP)
 		return false, true
 	}
 	if e.ExpireAt != 0 {
@@ -478,6 +510,8 @@ func (p *Pool) PruneExpired(now time.Time) int {
 			delete(p.master, ip)
 			delete(p.buffer, ip)
 			delete(p.cool, ip)
+			delete(p.dead, ip)
+			delete(p.deadN, ip)
 			p.masterVer++
 			n++
 		}
@@ -598,6 +632,10 @@ func (p *Pool) Save() {
 	for ip, t := range p.dead {
 		dead[ip] = t.Unix()
 	}
+	deadN := make(map[string]int, len(p.dead))
+	for ip, n := range p.deadN {
+		deadN[ip] = n
+	}
 	buf := make(map[string]*Hold, len(p.buffer))
 	for ip, h := range p.buffer {
 		buf[ip] = h
@@ -607,6 +645,7 @@ func (p *Pool) Save() {
 	p.saveJSON("pool-ext.json", ext)
 	p.saveJSON("pool-cool.json", cool)
 	p.saveJSON("pool-dead.json", dead)
+	p.saveJSON("pool-dead-n.json", deadN)
 	p.saveJSON("pool-buffer.json", buf)
 }
 
@@ -629,6 +668,26 @@ func (p *Pool) load() {
 	if p.loadJSON("pool-dead.json", &dead) {
 		for ip, t := range dead {
 			p.dead[ip] = time.Unix(t, 0)
+		}
+	}
+	var deadN map[string]int
+	if p.loadJSON("pool-dead-n.json", &deadN) {
+		for ip, n := range deadN {
+			p.deadN[ip] = n
+		}
+	} else {
+		// 一次性迁移：老版本按固定 24 小时写坏池，那些时间戳在新阶梯下没有依据，
+		// 会让整个坏池（当时占七成）再躺一整天。退避记录缺失就是"从没算过阶梯"，
+		// 一律压回第一级，让它们十几分钟后重新过一次门槛。
+		now, n := time.Now(), 0
+		for ip, t := range p.dead {
+			if t.After(now.Add(p.cfg.DeadBackoff)) {
+				p.dead[ip] = now.Add(p.cfg.DeadBackoff)
+				n++
+			}
+		}
+		if n > 0 {
+			p.migrated = n
 		}
 	}
 	var buf map[string]*Hold

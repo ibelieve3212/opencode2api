@@ -35,7 +35,9 @@ func parseFlags() options {
 	flag.IntVar(&o.refreshBatch, "refresh-batch", 8, "每轮轮换刷新几个渠道")
 	flag.DurationVar(&o.bufferHold, "buffer-hold", 10*time.Minute, "缓冲池压制时长")
 	flag.IntVar(&o.bufferStrike, "buffer-strikes", 3, "同类错误升坏池阈值")
-	flag.DurationVar(&o.deadTTL, "dead-ttl", 24*time.Hour, "坏池沉睡时长")
+	flag.DurationVar(&o.deadBackoff, "dead-backoff", 15*time.Minute,
+		"坏池第一次沉睡时长，每再判死一次延长 4 倍，到 -dead-ttl 封顶")
+	flag.DurationVar(&o.deadTTL, "dead-ttl", 24*time.Hour, "坏池沉睡时长上限")
 	flag.IntVar(&o.releaseBatch, "release-batch", 300,
 		"每 30 秒最多从冷却/缓冲/坏池放回多少个候选（0=不限）")
 	flag.BoolVar(&o.sweep, "sweep", false, "全量扫描模式（不受健康池目标限制）")

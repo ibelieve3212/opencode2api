@@ -36,6 +36,10 @@ type Verdict struct {
 	Reset   time.Time
 }
 
+// maxQuotaHold 是 429 解封时刻的荒谬值上限。免费额度按天重置，任何"再等 30 天"
+// 的说法都只可能是上游算错，钳到一天正好覆盖最长的那个窗口。
+const maxQuotaHold = 24 * time.Hour
+
 // Classify 把上游/传输结果归类。
 func Classify(res gateway.ExitProbeResult, cfg Config) Verdict {
 	v := Verdict{Status: res.Status, Latency: time.Duration(res.Latency) * time.Millisecond}
@@ -45,19 +49,20 @@ func Classify(res gateway.ExitProbeResult, cfg Config) Verdict {
 	case res.Status == 429:
 		v.Kind, v.Reason = "quota", "429 额度墙"
 		// 解封时刻按可信度取：Retry-After 头 > 报文正文的绝对时刻 > 兜底。
-		// 不能一律押到下一个 08:00：额度是按出口自己的窗口恢复的，押一整天
-		// 会让一个其实还能用的出口白丢一天产能。
-		switch {
-		case res.RetryAfter > 0:
-			v.Reset = time.Now().Add(res.RetryAfter)
-		default:
-			v.Reset = parseQuotaReset(res.Body, time.Now())
+		// 上游既然明确说了还要等多久，就照它等：把它钳到 QuotaFallback 只会让
+		// 出口在封条还贴着的时候被反复叫醒、重探、再撞一次 429，白白占掉探针
+		// 预算。只有"上游什么都没说"时才用兜底值，而兜底值本身才需要钳制。
+		trusted := false
+		if res.RetryAfter > 0 {
+			v.Reset, trusted = time.Now().Add(res.RetryAfter), true
+		} else if r := parseQuotaReset(res.Body, time.Now()); !r.IsZero() {
+			v.Reset, trusted = r, true
 		}
-		if v.Reset.IsZero() {
+		if !trusted {
 			v.Reset = time.Now().Add(cfg.QuotaFallback)
-		}
-		if cap := time.Now().Add(cfg.QuotaFallback); v.Reset.After(cap) {
-			v.Reset = cap
+		} else if limit := time.Now().Add(maxQuotaHold); v.Reset.After(limit) {
+			// 只留一个荒谬值兜底：免费额度最长也就到下一个 08:00 重置。
+			v.Reset = limit
 		}
 	case res.Status == 401 || res.Status == 403:
 		v.Kind, v.Note, v.Reason = "buffered", "auth", "认证/形状不符"
@@ -309,8 +314,8 @@ func (g *Gate) apply(e *Exit, v Verdict) {
 		}
 		until, killed := g.Pool.Buffer(e, v.Note)
 		if killed {
-			g.log("x 坏池：%s %s 连续 %d 次，睡 %s", e.Token(), v.Reason,
-				g.Pool.Config().BufferStrikes, g.Pool.Config().DeadTTL)
+			g.log("x 坏池：%s %s 连续 %d 次，睡到 %s 再体检", e.Token(), v.Reason,
+				g.Pool.Config().BufferStrikes, until.Format("01-02 15:04"))
 		} else {
 			g.log("~ 缓冲池：%s %s，%s 后再验", e.Token(), v.Reason,
 				until.Sub(time.Now()).Round(time.Second))

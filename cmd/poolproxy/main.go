@@ -51,6 +51,7 @@ type options struct {
 	refreshBatch  int
 	bufferHold    time.Duration
 	bufferStrike  int
+	deadBackoff   time.Duration
 	deadTTL       time.Duration
 	sweep         bool
 	releaseBatch  int
@@ -61,6 +62,7 @@ func run(o options) error {
 	cfg.HealthTarget = o.healthTarget
 	cfg.BufferHold = o.bufferHold
 	cfg.BufferStrikes = o.bufferStrike
+	cfg.DeadBackoff = o.deadBackoff
 	cfg.DeadTTL = o.deadTTL
 	cfg.QuotaFallback = o.quotaFallback
 	cfg.HealthLease = o.healthLease
@@ -76,6 +78,10 @@ func run(o options) error {
 	st0 := p.Snapshot()
 	log.Printf("本地快照恢复：总池 %d / 冷却 %d / 缓冲 %d / 坏池 %d（无需联网）",
 		st0.Master, st0.Cool, st0.Buffer, st0.Dead)
+	if n := p.Migrated(); n > 0 {
+		log.Printf("坏池迁移：%d 个旧版固定 24h 条目压回第一级 %s，将提前复验",
+			n, cfg.DeadBackoff)
+	}
 
 	ch, err := pool.NewChannels(o.channelsFile)
 	if err != nil {
