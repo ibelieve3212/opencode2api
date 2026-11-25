@@ -30,26 +30,30 @@ func main() {
 }
 
 type options struct {
-	channelsFile string
-	stateDir     string
-	bind         string
-	socksPort    int
-	tokenPort    int
-	rrPort       int
-	nodesFile    string
-	exportHost   string
-	healthTarget int
-	conc         int
-	probeTimeout time.Duration
-	probeModel   string
-	gateURL      string
-	refresh      time.Duration
-	refreshBatch int
-	bufferHold   time.Duration
-	bufferStrike int
-	deadTTL      time.Duration
-	sweep        bool
-	releaseBatch int
+	channelsFile  string
+	stateDir      string
+	bind          string
+	socksPort     int
+	tokenPort     int
+	rrPort        int
+	nodesFile     string
+	exportHost    string
+	healthTarget  int
+	conc          int
+	probeTimeout  time.Duration
+	probeModels   []string
+	sample        int
+	samplePause   time.Duration
+	healthLease   time.Duration
+	quotaFallback time.Duration
+	gateURL       string
+	refresh       time.Duration
+	refreshBatch  int
+	bufferHold    time.Duration
+	bufferStrike  int
+	deadTTL       time.Duration
+	sweep         bool
+	releaseBatch  int
 }
 
 func run(o options) error {
@@ -58,6 +62,8 @@ func run(o options) error {
 	cfg.BufferHold = o.bufferHold
 	cfg.BufferStrikes = o.bufferStrike
 	cfg.DeadTTL = o.deadTTL
+	cfg.QuotaFallback = o.quotaFallback
+	cfg.HealthLease = o.healthLease
 
 	if err := os.MkdirAll(o.stateDir, 0o755); err != nil {
 		return err
@@ -87,8 +93,9 @@ func run(o options) error {
 	}
 	gate := &pool.Gate{
 		Pool: p, Channels: ch,
-		BaseURL: o.gateURL, Model: o.probeModel,
+		BaseURL: o.gateURL, Models: o.probeModels,
 		Timeout: o.probeTimeout, Concurrency: o.conc, Target: target,
+		Sample: o.sample, Pause: o.samplePause,
 		Log: log.Printf,
 		// 变体协议（雷神/UU）不能按出口直连拨号，统一经池子自己的 token 代理。
 		ProbeURL: func(e *pool.Exit) string {
@@ -96,7 +103,9 @@ func run(o options) error {
 		},
 	}
 	go gate.Run(ctx)
-	log.Printf("准入门槛：%d 并发进程内探测（bun 指纹，与 2api 同源），目标健康池 %d", o.conc, target)
+	log.Printf("准入门槛：%d 并发进程内探测（bun 指纹，与 2api 同源），目标健康池 %d，"+
+		"探针模型 %v，租约 %s，抽样间隔 %s",
+		o.conc, target, o.probeModels, o.healthLease, o.samplePause)
 
 	// 下游端口
 	ls := &pool.Listener{Pool: p, Log: log.Printf, Host: o.exportHost}

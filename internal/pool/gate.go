@@ -4,6 +4,16 @@ package pool
 //
 // 探针与 2api 共用 internal/httpx 的 bun 指纹传输，所以"探到的"就是"2api
 // 真会遇到的"。探测在进程内用 goroutine 并发，不再每出口 fork 一个子进程。
+//
+// 门槛按"抽样 + 租约"工作，不再全量轮询：
+//   - 每轮只从总池里随机取一小把候选，取样量由健康池缺口决定，不随池子变大；
+//   - 探通的出口进健康池并挂一个租约，租约到期才回候选复验；
+//   - 一轮里换遍所有探针模型仍然 429，才判这个出口没额度。
+//
+// 为什么不整池扫：2026-11-25 排查发现，出口的免费额度是按出口自己算的，一天
+// 只有几十次。全量轮询把额度烧在探测上，探到自己 429，又把 429 读成"上游整批
+// 封禁"，于是整池看着全死——同一分钟用真 opencode CLI 穿同一个出口是 200。
+// 探测本身必须是池子的支出里最小的一项。
 
 import (
 	"context"
@@ -34,14 +44,20 @@ func Classify(res gateway.ExitProbeResult, cfg Config) Verdict {
 		v.Kind, v.Reason = "healthy", "真实请求 200"
 	case res.Status == 429:
 		v.Kind, v.Reason = "quota", "429 额度墙"
-		// 上游的 429 报文自带解封时刻，按它冷却比一律押到下一个 08:00 精确得多：
-		// 免费额度按 IP 滚动 24 小时，各 IP 的解封点并不相同。
-		v.Reset = parseQuotaReset(res.Body, time.Now())
+		// 解封时刻按可信度取：Retry-After 头 > 报文正文的绝对时刻 > 兜底。
+		// 不能一律押到下一个 08:00：额度是按出口自己的窗口恢复的，押一整天
+		// 会让一个其实还能用的出口白丢一天产能。
+		switch {
+		case res.RetryAfter > 0:
+			v.Reset = time.Now().Add(res.RetryAfter)
+		default:
+			v.Reset = parseQuotaReset(res.Body, time.Now())
+		}
 		if v.Reset.IsZero() {
-			// 新版 429 报文不再给重置时刻。实测 ext 那 1.6 万个出口一整天
-			// 没有任何一个从 429 自行恢复，说明额度是按周期整批重置的，
-			// 所以兜底到下一个重置点（08:00），不要用短冷却反复空探。
-			v.Reset = NextReset(time.Now(), cfg.ResetHour)
+			v.Reset = time.Now().Add(cfg.QuotaFallback)
+		}
+		if cap := time.Now().Add(cfg.QuotaFallback); v.Reset.After(cap) {
+			v.Reset = cap
 		}
 	case res.Status == 401 || res.Status == 403:
 		v.Kind, v.Note, v.Reason = "buffered", "auth", "认证/形状不符"
@@ -69,18 +85,22 @@ type Gate struct {
 	Pool        *Pool
 	Channels    *Channels
 	BaseURL     string
-	Model       string
+	Models      []string // 探针模型：第一个是主用，429 时依次换下一个
 	Timeout     time.Duration
 	Concurrency int
-	Target      int // >0 时只在健康池未满时探测；0 = 一直扫
+	Target      int           // >0 时健康池达标就停止取样；0 = 一直扫
+	Sample      int           // 每轮取样出口数；0 = 按健康池缺口自动算
+	Pause       time.Duration // 两轮之间的间隔
 	Log         func(format string, args ...any)
 	// ProbeURL 返回探测该出口时使用的代理地址。变体协议不能直连拨号，
 	// 必须经池子自己的 token 代理转发。留空则退回 e.ProxyURL()。
 	ProbeURL func(e *Exit) string
 	jobs     chan *Exit
 
-	mu        sync.Mutex
-	satisfied bool // 达标提示只打一次
+	mu         sync.Mutex
+	satisfied  bool // 达标提示只打一次
+	primary    int  // 主用探针模型的下标
+	wallStreak int  // 连续多少个出口在换遍所有模型后仍然 429
 }
 
 func (g *Gate) log(format string, args ...any) {
@@ -91,8 +111,8 @@ func (g *Gate) log(format string, args ...any) {
 
 // Run 启动并发探针，直到 ctx 结束。
 //
-// 只有"一个"调度器负责取候选、看目标并投喂 worker：若让 96 个 worker 各自
-// 去算候选与目标，会把池子的锁抢死（实测 CPU 100%、渠道都入不了库）。
+// 只有"一个"调度器负责取样与投喂 worker：若让几十个 worker 各自去算候选与
+// 目标，会把池子的锁抢死（实测 CPU 100%、渠道都入不了库）。
 func (g *Gate) Run(ctx context.Context) {
 	n := g.Concurrency
 	if n <= 0 {
@@ -102,42 +122,78 @@ func (g *Gate) Run(ctx context.Context) {
 	for i := 0; i < n; i++ {
 		go g.worker(ctx)
 	}
-	go g.dispatch(ctx)
+	go g.rounds(ctx)
 }
 
-// dispatch 是唯一的候选生产者：补满并发槽位，然后交给 worker 去探。
-func (g *Gate) dispatch(ctx context.Context) {
-	tick := time.NewTicker(100 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			close(g.jobs)
-			return
-		case <-tick.C:
-		}
-		need := g.Concurrency - len(g.jobs) - g.Pool.InFlight()
-		if need <= 0 {
-			continue
+// rounds 是唯一的取样者：一轮取一小把、等它落地、歇一下，再决定下一轮。
+func (g *Gate) rounds(ctx context.Context) {
+	pause := g.Pause
+	if pause <= 0 {
+		pause = 20 * time.Second
+	}
+	for ctx.Err() == nil {
+		if expired := g.Pool.ExpireLeases(time.Now()); len(expired) > 0 {
+			g.log("~ 租约到期：%d 个出口回候选复验", len(expired))
 		}
 		if g.Target > 0 {
-			health := g.Pool.HealthCount()
-			if health >= g.Target {
-				g.noteSatisfied(health)
+			if h := g.Pool.HealthCount(); h >= g.Target {
+				g.noteSatisfied(h)
+				if !sleepCtx(ctx, pause) {
+					break
+				}
 				continue
 			}
-			if rest := g.Target - health; need > rest {
-				need = rest
-			}
 		}
-		for _, e := range g.Pool.Candidates(need, time.Now()) {
+		batch := g.Pool.Sample(g.sampleSize(), time.Now())
+		if len(batch) == 0 {
+			if !sleepCtx(ctx, pause) {
+				break
+			}
+			continue
+		}
+		g.log("抽样探测：本轮 %d 个出口（健康池 %d/%d）", len(batch), g.Pool.HealthCount(), g.Target)
+		for _, e := range batch {
 			select {
 			case g.jobs <- e:
-			default:
-				g.Pool.FinishProbe(e.IP) // 队列满，退回在飞标记
+			case <-ctx.Done():
+				g.Pool.FinishProbe(e.IP)
+			}
+			if ctx.Err() != nil {
+				break
 			}
 		}
+		g.waitIdle(ctx)
+		if !sleepCtx(ctx, pause) {
+			break
+		}
 	}
+	close(g.jobs)
+}
+
+// waitIdle 等本轮投出去的探测全部落地，再开下一轮。
+func (g *Gate) waitIdle(ctx context.Context) {
+	deadline := time.Now().Add(g.Timeout*3 + 30*time.Second)
+	for g.Pool.InFlight() > 0 && time.Now().Before(deadline) {
+		if !sleepCtx(ctx, 100*time.Millisecond) {
+			return
+		}
+	}
+}
+
+// sampleSize 决定这一轮探几个：够补上健康池的缺口就行，绝不整池扫。
+func (g *Gate) sampleSize() int {
+	if g.Sample > 0 {
+		return g.Sample
+	}
+	if g.Target <= 0 {
+		return 300
+	}
+	need := g.Target - g.Pool.HealthCount()
+	if need < 15 {
+		need = 15
+	}
+	// 命中率不确定，取缺口的两倍，一次就够填满。
+	return need * 2
 }
 
 func (g *Gate) worker(ctx context.Context) {
@@ -154,19 +210,81 @@ func (g *Gate) worker(ctx context.Context) {
 	}
 }
 
+// modelOrder 给出这次探测要依次试的探针模型，主用在前。
+func (g *Gate) modelOrder() []string {
+	g.mu.Lock()
+	start := g.primary
+	g.mu.Unlock()
+	n := len(g.Models)
+	if n == 0 {
+		return []string{""}
+	}
+	order := make([]string, 0, 3)
+	for i := 0; i < n && len(order) < 3; i++ {
+		order = append(order, g.Models[(start+i)%n])
+	}
+	return order
+}
+
 func (g *Gate) probe(ctx context.Context, e *Exit) {
+	order := g.modelOrder()
+	var v Verdict
+	allQuota := true
+	for _, model := range order {
+		v = Classify(g.probeOnce(ctx, e, model), g.Pool.Config())
+		if v.Kind != "quota" {
+			allQuota = false
+			break
+		}
+		// 429 未必是这个出口没额度：也可能是探针用的那个模型没额度。
+		// 换下一个模型再问一次，别让一个模型的额度给整池判死。
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	switched := g.noteWall(allQuota)
+	if switched != "" {
+		g.log("! 探针模型 %s 疑似自己没额度（连续 25 个出口全 429），改用 %s", switched, g.Models[g.modelPrimary()])
+	}
+	g.Pool.FinishProbe(e.IP)
+	g.Pool.NoteProbe(v.Kind)
+	g.apply(e, v)
+}
+
+func (g *Gate) probeOnce(ctx context.Context, e *Exit, model string) gateway.ExitProbeResult {
 	pctx, cancel := context.WithTimeout(ctx, g.Timeout+5*time.Second)
+	defer cancel()
 	target := e.ProxyURL()
 	if g.ProbeURL != nil {
 		target = g.ProbeURL(e)
 	}
-	res := gateway.ProbeExit(pctx, target, g.BaseURL, g.Model, g.Timeout)
-	cancel()
+	return gateway.ProbeExit(pctx, target, g.BaseURL, model, g.Timeout)
+}
 
-	v := Classify(res, g.Pool.Config())
-	g.Pool.FinishProbe(e.IP)
-	g.Pool.NoteProbe(v.Kind)
-	g.apply(e, v)
+func (g *Gate) modelPrimary() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.primary
+}
+
+// noteWall 统计"连续多少个出口在换遍所有探针模型后仍然 429"。这个数字一大，
+// 说明没额度的是探针模型本身，不是池子——正是 2026-11-25 那次误判的形状。
+// 到阈值就自动换主用模型，返回被换下的模型名（没换则返回空串）。
+func (g *Gate) noteWall(allQuota bool) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !allQuota {
+		g.wallStreak = 0
+		return ""
+	}
+	g.wallStreak++
+	if g.wallStreak < 25 || len(g.Models) < 2 {
+		return ""
+	}
+	old := g.Models[g.primary]
+	g.primary = (g.primary + 1) % len(g.Models)
+	g.wallStreak = 0
+	return old
 }
 
 func (g *Gate) apply(e *Exit, v Verdict) {
@@ -174,12 +292,13 @@ func (g *Gate) apply(e *Exit, v Verdict) {
 	case "healthy":
 		if g.Pool.Admit(e) {
 			st := g.Pool.Snapshot()
-			g.log("+ 健康池：%s <- %s（%s，%dms，在册 %d/%d）",
-				e.Token(), e.Addr(), v.Reason, v.Latency.Milliseconds(), st.Health, g.Target)
+			g.log("+ 健康池：%s <- %s（%s，%dms，租约 %s，在册 %d/%d）",
+				e.Token(), e.Addr(), v.Reason, v.Latency.Milliseconds(),
+				g.Pool.Config().HealthLease, st.Health, g.Target)
 		}
 	case "quota":
 		until := g.Pool.Cool(e, v.Reset)
-		g.log("- 冷却池：%s %s，待到 %s 额度重置", e.Token(), v.Reason,
+		g.log("- 冷却池：%s %s，待到 %s", e.Token(), v.Reason,
 			until.Format("01-02 15:04"))
 	case "buffered":
 		if e.Kind == KindUU && v.Note == "tunnel" {
@@ -242,14 +361,25 @@ func parseQuotaReset(body string, now time.Time) time.Time {
 	return now.Add(d)
 }
 
-// noteSatisfied 在健康池达标时提示一次：此后不再全量扫描，把每个出口当天的
-// 免费额度留给真实用户流量，而不是被门槛自己烧掉。
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// noteSatisfied 在健康池达标时提示一次：此时不再取样，把出口当天的免费额度
+// 留给真实用户流量，而不是被门槛自己烧掉。
 func (g *Gate) noteSatisfied(health int) {
 	g.mu.Lock()
 	noted := g.satisfied
 	g.satisfied = true
 	g.mu.Unlock()
 	if !noted {
-		g.log("健康池达标（%d/%d）：停止全量扫描，额度留给真实流量", health, g.Target)
+		g.log("健康池达标（%d/%d）：停止取样，额度留给真实流量", health, g.Target)
 	}
 }

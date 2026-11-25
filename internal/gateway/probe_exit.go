@@ -28,6 +28,10 @@ type ExitProbeResult struct {
 	Body    string `json:"body,omitempty"`
 	Err     string `json:"err,omitempty"`
 	Latency int64  `json:"latency_ms"`
+	// RetryAfter 是上游 429 响应要求等待的时长（优先 retry-after-ms，回退
+	// Retry-After，两者都支持秒/小数/HTTP 日期）。上游给了就按它冷却这个出口，
+	// 不给再由报文正文/兜底值决定。
+	RetryAfter time.Duration `json:"retry_after_ms,omitempty"`
 }
 
 // ProbeExit 经 proxyURL（socks5://user:pass@host:port）发一次真实的免费模型请求。
@@ -81,5 +85,10 @@ func ProbeExit(ctx context.Context, proxyURL, baseURL, model string, timeout tim
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	out.Status = resp.StatusCode
 	out.Body = string(raw)
+	// 429 时上游会写 retry-after-ms / Retry-After：这是它自己给出的解封时长，
+	// 比从报文正文里正则抠时刻可靠。非 429 不记，免得误读成"该退役"。
+	if resp.StatusCode == 429 {
+		out.RetryAfter = retryAfterHint(resp.Header)
+	}
 	return out
 }

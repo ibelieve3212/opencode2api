@@ -2,11 +2,13 @@ package main
 
 import (
 	"flag"
+	"strings"
 	"time"
 )
 
 func parseFlags() options {
 	var o options
+	var probeModels string
 	flag.StringVar(&o.channelsFile, "channels", "/data/channels.json", "渠道清单 JSON")
 	flag.StringVar(&o.stateDir, "state-dir", "/data/state", "状态目录")
 	flag.StringVar(&o.bind, "bind", "127.0.0.1", "监听地址")
@@ -18,7 +20,15 @@ func parseFlags() options {
 	flag.IntVar(&o.healthTarget, "health-target", 200, "健康池目标数量")
 	flag.IntVar(&o.conc, "probe-concurrency", 96, "并发探针数")
 	flag.DurationVar(&o.probeTimeout, "probe-timeout", 12*time.Second, "单次探测超时")
-	flag.StringVar(&o.probeModel, "probe-model", "deepseek-v4.1-flash-free", "探针模型")
+	flag.StringVar(&probeModels, "probe-model",
+		"big-pickle,beam-free,iceman-free,tidepool-alpha-free",
+		"探针模型，逗号分隔：第一个主用，429 时依次换下一个（一个模型没额度不该给整池判死）")
+	flag.IntVar(&o.sample, "sample-batch", 0, "每轮取样的出口数（0 = 按健康池缺口自动算）")
+	flag.DurationVar(&o.samplePause, "sample-pause", 20*time.Second, "两轮取样之间的间隔")
+	flag.DurationVar(&o.healthLease, "health-lease", 15*time.Minute,
+		"健康池租约：探通的出口多久后回候选复验（0 = 不复验）")
+	flag.DurationVar(&o.quotaFallback, "quota-fallback", 3*time.Hour,
+		"429 报文没给解封时刻时的兜底冷却")
 	flag.StringVar(&o.gateURL, "gate-url",
 		"https://opencode.ai/inference", "门槛上游基址")
 	flag.DurationVar(&o.refresh, "refresh-interval", 10*time.Minute, "渠道保鲜间隔")
@@ -30,5 +40,10 @@ func parseFlags() options {
 		"每 30 秒最多从冷却/缓冲/坏池放回多少个候选（0=不限）")
 	flag.BoolVar(&o.sweep, "sweep", false, "全量扫描模式（不受健康池目标限制）")
 	flag.Parse()
+	for _, m := range strings.Split(probeModels, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			o.probeModels = append(o.probeModels, m)
+		}
+	}
 	return o
 }

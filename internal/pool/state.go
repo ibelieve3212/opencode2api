@@ -2,6 +2,7 @@ package pool
 
 import (
 	"encoding/json"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,6 +25,7 @@ type Config struct {
 	DeadTTL       time.Duration // 坏池睡多久再体检
 	QuotaFallback time.Duration // 上游没给重置时刻时的兜底冷却
 	ResetHour     int           // 每日额度重置的小时（北京时间 8）
+	HealthLease   time.Duration // 健康池租约：探通只是"上次探通"，不是永久可用
 }
 
 // DefaultConfig 与 Python 版线上参数一致。
@@ -33,8 +35,9 @@ func DefaultConfig() Config {
 		BufferHold:    10 * time.Minute,
 		BufferStrikes: 3,
 		DeadTTL:       24 * time.Hour,
-		QuotaFallback: 24 * time.Hour,
+		QuotaFallback: 3 * time.Hour,
 		ResetHour:     8,
+		HealthLease:   15 * time.Minute,
 	}
 }
 
@@ -63,6 +66,7 @@ type Pool struct {
 	cool     map[string]time.Time // 冷却池：ip -> 到期
 	buffer   map[string]*Hold     // 缓冲池
 	dead     map[string]time.Time // 坏池
+	lease    map[string]time.Time // 健康池租约：token -> 到期
 	inFlight map[string]bool      // 正在探测的 ip
 	idx      int
 	stats    Stats
@@ -86,6 +90,7 @@ func New(cfg Config, dir string) (*Pool, error) {
 		cool:     map[string]time.Time{},
 		buffer:   map[string]*Hold{},
 		dead:     map[string]time.Time{},
+		lease:    map[string]time.Time{},
 		inFlight: map[string]bool{},
 		dir:      dir,
 	}
@@ -124,9 +129,11 @@ func (p *Pool) Admit(e *Exit) bool {
 	for tok, cur := range p.health {
 		if cur.IP == e.IP {
 			delete(p.health, tok)
+			delete(p.lease, tok)
 		}
 	}
 	p.health[e.Token()] = e.Clone()
+	p.lease[e.Token()] = time.Now().Add(p.cfg.HealthLease)
 	delete(p.cool, e.IP)
 	delete(p.buffer, e.IP)
 	delete(p.dead, e.IP)
@@ -204,8 +211,30 @@ func (p *Pool) dropHealthLocked(ip string) {
 	for tok, cur := range p.health {
 		if cur.IP == ip {
 			delete(p.health, tok)
+			delete(p.lease, tok)
 		}
 	}
+}
+
+// ExpireLeases 退役到期的健康池租约，把它们放回候选重新过门槛。
+//
+// 健康池里的一条只代表"上次探通"。出口的免费额度既会被真实流量吃掉，也会被
+// 同一台机器上的其它使用者吃掉，探通之后永不复验，池子就会把 429 一直转给
+// 真实请求。租约到期后出口回候选，由门槛抽样复验——探测量由目标数量决定，
+// 不再随池子变大而膨胀。
+func (p *Pool) ExpireLeases(now time.Time) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var expired []string
+	for tok, until := range p.lease {
+		if until.After(now) {
+			continue
+		}
+		delete(p.lease, tok)
+		delete(p.health, tok)
+		expired = append(expired, tok)
+	}
+	return expired
 }
 
 // ---------- 取出口 ----------
@@ -286,7 +315,18 @@ func (p *Pool) Snapshot() Stats {
 // ---------- 候选调度 ----------
 
 // Candidates 返回可以立刻探测的出口（不在任何"不予派发"的池子里、没有在飞）。
+// 从游标处顺序取，供全量扫描使用。
 func (p *Pool) Candidates(limit int, now time.Time) []*Exit {
+	return p.candidates(limit, now, false)
+}
+
+// Sample 从随机位置取一小批候选，供门槛的抽样探测使用：样本散在全池各处，
+// 而不是老在候选列表头部打转。
+func (p *Pool) Sample(limit int, now time.Time) []*Exit {
+	return p.candidates(limit, now, true)
+}
+
+func (p *Pool) candidates(limit int, now time.Time, randomStart bool) []*Exit {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make([]*Exit, 0, limit)
@@ -313,6 +353,9 @@ func (p *Pool) Candidates(limit int, now time.Time) []*Exit {
 		p.candScan = 0
 	}
 	n := len(p.candList)
+	if randomStart {
+		p.candScan = rand.IntN(n)
+	}
 	for i := 0; i < n && len(out) < limit; i++ {
 		ip := p.candList[(p.candScan+i)%n]
 		e := p.master[ip]
