@@ -132,3 +132,90 @@ func TestProbeBudgetResetsNextDay(t *testing.T) {
 		t.Fatalf("翻页后预算应恢复 %d，实际 %d", cfg.ProbeBudget, left)
 	}
 }
+
+// 探针台账挂在出口上，不挂在凭据上：面板把口令换了，机器还是那台机器，免费额度
+// 也还是那个额度。2026-11-26 实测台账和入池日志差 213 条，213/213 都是入池之后
+// 凭据被刷新过的——就是这里的 delete(probeN) 干的。
+func TestCredentialRefreshKeepsProbeLedger(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ProbeBudget = 3
+	p, err := New(cfg, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &Exit{IP: "203.0.113.31", Port: 6300, Kind: KindExt, User: "u1", Secret: "s1"}
+	p.UpsertMaster(e)
+	p.BurnProbe(e.IP)
+
+	rotated := &Exit{IP: "203.0.113.31", Port: 6300, Kind: KindExt, User: "u2", Secret: "s2"}
+	if _, rf := p.UpsertMaster(rotated); !rf {
+		t.Fatal("换了口令应算凭据更新")
+	}
+	if left := p.ProbeLeft(e.IP); left != cfg.ProbeBudget-1 {
+		t.Fatalf("凭据轮换不该清探针台账，应剩 %d 次，实际 %d", cfg.ProbeBudget-1, left)
+	}
+	if got := len(p.candidates(4, time.Now(), false)); got != 1 {
+		t.Fatalf("预算还剩 %d 次，应仍是候选，实际取了 %d 个", cfg.ProbeBudget-1, got)
+	}
+}
+
+// 换端口或换隧道就是换了出口身份，那是真·新额度，台账必须从零起算。
+func TestPortOrTunnelChangeResetsProbeLedger(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ProbeBudget = 3
+	for _, tc := range []struct {
+		name string
+		e    *Exit
+	}{
+		{"ext 换端口", &Exit{IP: "203.0.113.32", Port: 6301, Kind: KindExt, User: "u1", Secret: "s1"}},
+		{"uu", &Exit{IP: "203.0.113.32", Port: 6300, Kind: KindUU, User: "u1", Secret: "s1"}},
+		{"leigod", &Exit{IP: "203.0.113.32", Port: 6300, Kind: KindLeigod, User: "u1", Secret: "s1"}},
+	} {
+		p, err := New(cfg, t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := &Exit{IP: tc.e.IP, Port: 6300, Kind: tc.e.Kind, User: "u1", Secret: "s1"}
+		p.UpsertMaster(base)
+		p.BurnProbe(base.IP)
+		if left := p.ProbeLeft(base.IP); left == cfg.ProbeBudget {
+			t.Fatalf("%s: 前置条件错，烧过一次后应剩 %d 次", tc.name, cfg.ProbeBudget-1)
+		}
+		if tc.e.Kind == KindExt {
+			p.UpsertMaster(tc.e) // 换端口
+		} else {
+			p.UpsertMaster(&Exit{IP: tc.e.IP, Port: tc.e.Port, Kind: tc.e.Kind, User: "u9", Secret: "s9"}) // 换凭据
+		}
+		if left := p.ProbeLeft(base.IP); left != cfg.ProbeBudget {
+			t.Fatalf("%s: 换隧道/换端口后台账应清零，应剩 %d 次，实际 %d", tc.name, cfg.ProbeBudget, left)
+		}
+	}
+}
+
+// 状态行的「200」只该来自 NoteProbe：Admit 也加一次的话，200 会超过「已探」总数，
+// 日志上看起来像池子在凭空造出成功。
+func TestHealthyCounterCountsOncePerProbe(t *testing.T) {
+	cfg := DefaultConfig()
+	p, err := New(cfg, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &Exit{IP: "203.0.113.33", Port: 6300, Kind: KindExt}
+	p.UpsertMaster(e)
+
+	p.FinishProbe(e.IP)
+	p.NoteProbe("healthy")
+	if !p.Admit(e) {
+		t.Fatal("第一次入池应成功")
+	}
+	st := p.Snapshot()
+	if st.Probed != 1 {
+		t.Fatalf("已探应为 1，实际 %d", st.Probed)
+	}
+	if st.Healthy != 1 {
+		t.Fatalf("一次探通只能算一次 200，实际 %d", st.Healthy)
+	}
+	if st.Probed < st.Healthy {
+		t.Fatalf("200 (%d) 不该超过已探 (%d)", st.Healthy, st.Probed)
+	}
+}

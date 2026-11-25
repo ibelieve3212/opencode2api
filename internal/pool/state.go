@@ -82,7 +82,7 @@ type Pool struct {
 	dead     map[string]time.Time // 坏池
 	deadN    map[string]int       // 坏池：该 ip 连续被判死了几次，用来算退避
 	quotaN   map[string]int       // 冷却池：该 ip 连续撞了几次 429，用来算退避
-	probeN   map[string]int       // 该 ip 今天被探通了几次（= 烧掉几个额度）
+	probeN   map[string]int       // 该 ip 今天被探通了几次（= 烧掉几个额度）；按出口 IP 记，不随凭据刷新清零
 	probeDay string               // probeN/quotaN 属于哪个额度日（到点整体清零）
 	lease    map[string]time.Time // 健康池租约：token -> 到期
 	inFlight map[string]bool      // 正在探测的 ip
@@ -170,7 +170,8 @@ func (p *Pool) Admit(e *Exit) bool {
 	// 过的出口会一直背着最长的沉睡时长。
 	delete(p.deadN, e.IP)
 	delete(p.quotaN, e.IP)
-	p.stats.Healthy++
+	// 计数交给 NoteProbe("healthy")，这里不能再加：一次探通只该算一次 200，
+	// 两处都加会让状态行打出「已探 848，200 880」这种 200 比总数还多的怪数。
 	return true
 }
 
@@ -574,7 +575,10 @@ func (p *Pool) NoteProbe(kind string) {
 	p.mu.Unlock()
 }
 
-// UpsertMaster 把渠道拉到的出口合并进总池；凭据变了就当新出口重新过门槛。
+// UpsertMaster 把渠道拉到的出口合并进总池；凭据变了就重新过门槛。
+//
+// 「重新过门槛」不等于「当新出口」：探针台账（probeN）按出口 IP 记，普通的凭据
+// 轮换不清它，只有换隧道（Kind != ext）或换端口才清——见下面分支里的注释。
 func (p *Pool) UpsertMaster(e *Exit) (added bool, refreshed bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -585,9 +589,11 @@ func (p *Pool) UpsertMaster(e *Exit) (added bool, refreshed bool) {
 		return true, false
 	}
 	if old.User != e.User || old.Secret != e.Secret || old.Port != e.Port {
+		portChanged := old.Port != e.Port
 		old.User, old.Secret, old.Port = e.User, e.Secret, e.Port
 		old.ExpireAt = e.ExpireAt
 		old.Born = time.Now()
+		// 健康池里那条带着旧凭据，留着会拿过期口令去转发，必须撤掉重新过门槛。
 		p.dropHealthLocked(e.IP)
 		// 端口/凭据变了就是换了一条可用链路：必须把旧的冷却与坏池记录清掉，
 		// 否则 UU 这种「IP 不变、端口轮换」的节点会永远躺在坏池里睡 24 小时。
@@ -596,7 +602,18 @@ func (p *Pool) UpsertMaster(e *Exit) (added bool, refreshed bool) {
 		delete(p.dead, e.IP)
 		delete(p.deadN, e.IP)
 		delete(p.quotaN, e.IP)
-		delete(p.probeN, e.IP)
+		// 但「今天已经烧掉几个额度」不能跟着清：免费额度挂在出口那台机器上，不挂在
+		// 凭据上（2026-11-26 实测：429 与凭据、project、出口 IP 漂移全都无关）。
+		// ext 面板每隔几十轮刷新一次口令，一轮 40 个渠道就有上万条凭据更新；连
+		// probeN 一起清，被探过的出口就永远是「新出口」，采样会反复拿已经烧过额度
+		// 的出口去撞 429，预算上限形同虚设——实测 400 条入池日志里有 213 条在台账
+		// 里查不到，且 213/213 都是入池之后凭据被刷新过的。
+		//
+		// UU / 雷神不适用：它们拉到的 IP 是隧道入口，端口轮换等于换了一条隧道，
+		// 出口侧确实是新机器新额度，必须从零起算。
+		if old.Kind != KindExt || portChanged {
+			delete(p.probeN, e.IP)
+		}
 		return false, true
 	}
 	if e.ExpireAt != 0 {
