@@ -135,7 +135,7 @@ func TestProbeBudgetResetsNextDay(t *testing.T) {
 
 // 探针台账挂在出口上，不挂在凭据上：面板把口令换了，机器还是那台机器，免费额度
 // 也还是那个额度。2026-11-26 实测台账和入池日志差 213 条，213/213 都是入池之后
-// 凭据被刷新过的——就是这里的 delete(probeN) 干的。
+// 凭据被刷新过的。
 func TestCredentialRefreshKeepsProbeLedger(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ProbeBudget = 3
@@ -147,47 +147,144 @@ func TestCredentialRefreshKeepsProbeLedger(t *testing.T) {
 	p.UpsertMaster(e)
 	p.BurnProbe(e.IP)
 
+	// 链路坏了才轮换凭据，这是它唯一的翻身机会；轮换本身不清台账。
+	p.Kill(e)
 	rotated := &Exit{IP: "203.0.113.31", Port: 6300, Kind: KindExt, User: "u2", Secret: "s2"}
 	if _, rf := p.UpsertMaster(rotated); !rf {
-		t.Fatal("换了口令应算凭据更新")
+		t.Fatal("坏池里换了口令应算凭据更新")
 	}
 	if left := p.ProbeLeft(e.IP); left != cfg.ProbeBudget-1 {
 		t.Fatalf("凭据轮换不该清探针台账，应剩 %d 次，实际 %d", cfg.ProbeBudget-1, left)
 	}
-	if got := len(p.candidates(4, time.Now(), false)); got != 1 {
-		t.Fatalf("预算还剩 %d 次，应仍是候选，实际取了 %d 个", cfg.ProbeBudget-1, got)
+}
+
+// 这次的线上缺陷：面板给同一个出口 IP 挂着 2～6 个账号，池子按"最后写入者赢"
+// 合并，一轮刷新就能把 43% 的总池判成"凭据更新"，并顺手清掉冷却、坏池、两条退避
+// 阶梯和探针台账。实测 quotaN / deadN 双双卡在 3 级（阶梯各 5 级），从来没出口爬到
+// 顶——刚被 429 压下去的出口每轮都被放回池子再撞一次，这就是"一直撞上 429"。
+func TestExtSiblingAccountChurnKeepsLedgers(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ProbeBudget = 3
+	p, err := New(cfg, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &Exit{IP: "203.0.113.41", Port: 6300, Kind: KindExt, User: "u3", Secret: "s3"}
+	p.UpsertMaster(base)
+	p.BurnProbe(base.IP)
+	p.Cool(base) // 撞了一次 429：quotaN=1，进冷却池
+
+	// 面板把同一台机器的兄弟账号轮着报上来，顺序任意。
+	siblings := []*Exit{
+		{IP: base.IP, Port: 6300, Kind: KindExt, User: "u1", Secret: "s1"},
+		{IP: base.IP, Port: 6300, Kind: KindExt, User: "u5", Secret: "s5"},
+		{IP: base.IP, Port: 6300, Kind: KindExt, User: "u2", Secret: "s2"},
+	}
+	for round := 0; round < 3; round++ {
+		for _, s := range siblings {
+			p.UpsertMaster(s)
+		}
+		if _, ok := p.cool[base.IP]; !ok {
+			t.Fatalf("第 %d 轮：兄弟账号轮换把 429 冷却清掉了", round+1)
+		}
+		if got := p.quotaN[base.IP]; got != 1 {
+			t.Fatalf("第 %d 轮：429 阶梯被清成 %d 级，应保持 1 级", round+1, got)
+		}
+		if left := p.ProbeLeft(base.IP); left != cfg.ProbeBudget-1 {
+			t.Fatalf("第 %d 轮：探针台账被清，应剩 %d 次，实际 %d", round+1, cfg.ProbeBudget-1, left)
+		}
+	}
+
+	// 收敛：来回换了几轮之后总池里是确定的那一份，再灌也不会被当成"凭据更新"。
+	cred := p.master[base.IP]
+	if cred.User != "u1" || cred.Secret != "s1" {
+		t.Fatalf("应确定性收敛到字典序最小的账号 u1/s1，实际 %s/%s", cred.User, cred.Secret)
+	}
+	for _, s := range siblings {
+		if _, rf := p.UpsertMaster(s); rf {
+			t.Fatalf("已收敛后再报 %s/%s 不该再算凭据更新", s.User, s.Secret)
+		}
 	}
 }
 
-// 换端口或换隧道就是换了出口身份，那是真·新额度，台账必须从零起算。
-func TestPortOrTunnelChangeResetsProbeLedger(t *testing.T) {
+// 正在供货的那条不动：同一 ip:port 上的兄弟账号不见得能连（实测有的通、有的
+// 一直超时），拿一个"看起来更小"的凭据去换掉一条验通过的链路纯属自伤。
+func TestExtServingExitKeepsProvenCredential(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ProbeBudget = 3
+	p, err := New(cfg, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := &Exit{IP: "203.0.113.43", Port: 6300, Kind: KindExt, User: "u9", Secret: "s9"}
+	p.UpsertMaster(good)
+	p.Admit(good) // 验通过，进健康池供货
+
+	smaller := &Exit{IP: good.IP, Port: 6300, Kind: KindExt, User: "u1", Secret: "s1"}
+	if _, rf := p.UpsertMaster(smaller); rf {
+		t.Fatal("正在供货的出口不该被换成没验过的兄弟账号")
+	}
+	if cur := p.master[good.IP]; cur.User != "u9" || cur.Secret != "s9" {
+		t.Fatalf("总池凭据应保持验通过的 u9/s9，实际 %s/%s", cur.User, cur.Secret)
+	}
+	if _, ok := p.health[good.Token()]; !ok {
+		t.Fatal("健康池里那条不该被撤掉")
+	}
+}
+
+// 同一份凭据连续报上来（面板最常见的形态）一次都不该算更新。
+func TestExtSameCredentialIsNotAChange(t *testing.T) {
+	p, err := New(DefaultConfig(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &Exit{IP: "203.0.113.42", Port: 6300, Kind: KindExt, User: "u1", Secret: "s1", ExpireAt: 1}
+	p.UpsertMaster(e)
+	for i := 0; i < 5; i++ {
+		if _, rf := p.UpsertMaster(e); rf {
+			t.Fatalf("第 %d 次：凭据没变不该算更新", i+1)
+		}
+	}
+}
+
+// 换隧道（uu / 雷神）就是换了出口机器，额度、冷却、坏池、探针台账必须从零起算。
+func TestTunnelChangeResetsLedgers(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ProbeBudget = 3
 	for _, tc := range []struct {
 		name string
-		e    *Exit
+		init *Exit
+		next *Exit
 	}{
-		{"ext 换端口", &Exit{IP: "203.0.113.32", Port: 6301, Kind: KindExt, User: "u1", Secret: "s1"}},
-		{"uu", &Exit{IP: "203.0.113.32", Port: 6300, Kind: KindUU, User: "u1", Secret: "s1"}},
-		{"leigod", &Exit{IP: "203.0.113.32", Port: 6300, Kind: KindLeigod, User: "u1", Secret: "s1"}},
+		{
+			"uu 换隧道",
+			&Exit{IP: "203.0.113.51", Port: 6300, Kind: KindUU, User: "u1", Secret: "s1"},
+			&Exit{IP: "203.0.113.51", Port: 6301, Kind: KindUU, User: "u2", Secret: "s2"},
+		},
+		{
+			"雷神换隧道",
+			&Exit{IP: "203.0.113.52", Port: 6300, Kind: KindLeigod, User: "u1", Secret: "s1"},
+			&Exit{IP: "203.0.113.52", Port: 6301, Kind: KindLeigod, User: "u2", Secret: "s2"},
+		},
 	} {
 		p, err := New(cfg, t.TempDir())
 		if err != nil {
 			t.Fatal(err)
 		}
-		base := &Exit{IP: tc.e.IP, Port: 6300, Kind: tc.e.Kind, User: "u1", Secret: "s1"}
-		p.UpsertMaster(base)
-		p.BurnProbe(base.IP)
-		if left := p.ProbeLeft(base.IP); left == cfg.ProbeBudget {
-			t.Fatalf("%s: 前置条件错，烧过一次后应剩 %d 次", tc.name, cfg.ProbeBudget-1)
+		p.UpsertMaster(tc.init)
+		p.BurnProbe(tc.init.IP)
+		p.Cool(tc.init)
+		if _, rf := p.UpsertMaster(tc.next); !rf {
+			t.Fatalf("%s: 换隧道应算凭据更新", tc.name)
 		}
-		if tc.e.Kind == KindExt {
-			p.UpsertMaster(tc.e) // 换端口
-		} else {
-			p.UpsertMaster(&Exit{IP: tc.e.IP, Port: tc.e.Port, Kind: tc.e.Kind, User: "u9", Secret: "s9"}) // 换凭据
+		if left := p.ProbeLeft(tc.init.IP); left != cfg.ProbeBudget {
+			t.Fatalf("%s: 换隧道后探针台账应清零，应剩 %d 次，实际 %d", tc.name, cfg.ProbeBudget, left)
 		}
-		if left := p.ProbeLeft(base.IP); left != cfg.ProbeBudget {
-			t.Fatalf("%s: 换隧道/换端口后台账应清零，应剩 %d 次，实际 %d", tc.name, cfg.ProbeBudget, left)
+		if _, ok := p.quotaN[tc.init.IP]; ok {
+			t.Fatalf("%s: 换隧道后 429 阶梯应清零", tc.name)
+		}
+		if _, ok := p.cool[tc.init.IP]; ok {
+			t.Fatalf("%s: 换隧道后冷却池应清空", tc.name)
 		}
 	}
 }

@@ -575,10 +575,21 @@ func (p *Pool) NoteProbe(kind string) {
 	p.mu.Unlock()
 }
 
-// UpsertMaster 把渠道拉到的出口合并进总池；凭据变了就重新过门槛。
+// UpsertMaster 把渠道拉到的出口合并进总池。
 //
-// 「重新过门槛」不等于「当新出口」：探针台账（probeN）按出口 IP 记，普通的凭据
-// 轮换不清它，只有换隧道（Kind != ext）或换端口才清——见下面分支里的注释。
+// 返回值 refreshed 只说一件事：总池里这条出口的拨号凭据（user/secret/port）
+// 换了没有。它不再意味着"历史台账清零"。
+//
+// ext 出口的身份就是那台出口机器本身（assigned_ip 既是 SOCKS 入口也是出口主机，
+// 免费额度挂在它身上），而面板会给同一个 IP 挂 2～6 个账号、甚至用两个 socks
+// 端口报同一台机器。2026-11-26 全量实测：195 个渠道 13.9 万行只落成 16264 个 IP，
+// 其中 8419 个 IP 同时挂着 2～6 个账号；间隔 4 分钟的两轮抓取里，账号集合
+// 16011/16264 完全一致。也就是说面板侧的凭据是稳定的，是池子按"最后写入者赢"
+// 合并，才让自己每一轮把 43% 的总池、51% 的冷却池判成"凭据更新"并顺手清空台账。
+//
+// 所以 ext 走 refreshExtLocked：确定性择优，且一条台账都不清。UU / 雷神的 IP 是
+// 隧道入口，端口轮换等于换了一条隧道，出口侧确实是新机器新额度，维持原来的全清
+// 逻辑（见下）。
 func (p *Pool) UpsertMaster(e *Exit) (added bool, refreshed bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -588,38 +599,105 @@ func (p *Pool) UpsertMaster(e *Exit) (added bool, refreshed bool) {
 		p.masterVer++
 		return true, false
 	}
-	if old.User != e.User || old.Secret != e.Secret || old.Port != e.Port {
-		portChanged := old.Port != e.Port
-		old.User, old.Secret, old.Port = e.User, e.Secret, e.Port
-		old.ExpireAt = e.ExpireAt
-		old.Born = time.Now()
-		// 健康池里那条带着旧凭据，留着会拿过期口令去转发，必须撤掉重新过门槛。
-		p.dropHealthLocked(e.IP)
-		// 端口/凭据变了就是换了一条可用链路：必须把旧的冷却与坏池记录清掉，
-		// 否则 UU 这种「IP 不变、端口轮换」的节点会永远躺在坏池里睡 24 小时。
-		delete(p.buffer, e.IP)
-		delete(p.cool, e.IP)
-		delete(p.dead, e.IP)
-		delete(p.deadN, e.IP)
-		delete(p.quotaN, e.IP)
-		// 但「今天已经烧掉几个额度」不能跟着清：免费额度挂在出口那台机器上，不挂在
-		// 凭据上（2026-11-26 实测：429 与凭据、project、出口 IP 漂移全都无关）。
-		// ext 面板每隔几十轮刷新一次口令，一轮 40 个渠道就有上万条凭据更新；连
-		// probeN 一起清，被探过的出口就永远是「新出口」，采样会反复拿已经烧过额度
-		// 的出口去撞 429，预算上限形同虚设——实测 400 条入池日志里有 213 条在台账
-		// 里查不到，且 213/213 都是入池之后凭据被刷新过的。
-		//
-		// UU / 雷神不适用：它们拉到的 IP 是隧道入口，端口轮换等于换了一条隧道，
-		// 出口侧确实是新机器新额度，必须从零起算。
-		if old.Kind != KindExt || portChanged {
-			delete(p.probeN, e.IP)
+	if old.User == e.User && old.Secret == e.Secret && old.Port == e.Port {
+		if e.ExpireAt != 0 {
+			old.ExpireAt = e.ExpireAt
 		}
-		return false, true
+		return false, false
 	}
-	if e.ExpireAt != 0 {
-		old.ExpireAt = e.ExpireAt
+	if old.Kind == KindExt && e.Kind == KindExt {
+		return false, p.refreshExtLocked(old, e)
 	}
-	return false, false
+	// 换隧道：出口侧是新机器，额度、冷却、坏池、探针台账一律从零起算。
+	old.User, old.Secret, old.Port = e.User, e.Secret, e.Port
+	old.ExpireAt = e.ExpireAt
+	old.Born = time.Now()
+	// 健康池里那条带着旧凭据，留着会拿过期口令去转发，必须撤掉重新过门槛。
+	p.dropHealthLocked(e.IP)
+	delete(p.buffer, e.IP)
+	delete(p.cool, e.IP)
+	delete(p.dead, e.IP)
+	delete(p.deadN, e.IP)
+	delete(p.quotaN, e.IP)
+	delete(p.probeN, e.IP)
+	return false, true
+}
+
+// credLess 给 ext 出口的拨号凭据定序：同一个出口 IP 上多个账号之间按
+// (端口, user, secret) 字典序取最小者，结果与渠道返回顺序无关。
+func credLess(a, b *Exit) bool {
+	if a.Port != b.Port {
+		return a.Port < b.Port
+	}
+	if a.User != b.User {
+		return a.User < b.User
+	}
+	return a.Secret < b.Secret
+}
+
+// refreshExtLocked 处理 ext 出口的凭据变化，返回凭据是否真的换了。
+//
+// 三条规则：
+//  1. 正在供货的（健康池里有验通过的那条）不动。同一 ip:port 上的兄弟账号不见得
+//     能连——实测有的通、有的一直超时；拿一个"看起来更小"的凭据去替换一条正在
+//     供货的链路纯属自伤。
+//  2. 已经判定坏的（缓冲池/坏池里）随便换：说明手上这份凭据连不上，换一个兄弟
+//     账号才有机会恢复。这是唯一会让凭据在兄弟账号之间摆动的情形，且不碰计时器。
+//  3. 其余情况（候选、撞 429 冷却中）按 credLess 确定性择优，几轮内收敛到同一个，
+//     之后不再抖动——冷却中的出口本来就不拨号，趁这时换凭据也不影响供货。
+//
+// 无论走哪条，冷却池、坏池、两条退避阶梯、探针台账都不清：它们记的是那台出口
+// 机器的状态，跟拿哪个账号去拨号没关系。清掉就等于每轮把手刚压下去的出口放回
+// 池子再撞一次 429——这正是"一直撞上 429"本身（实测 quotaN 与 deadN 双双卡在
+// 3 级，两条阶梯各 5 级，从来没有出口爬到顶）。
+func (p *Pool) refreshExtLocked(old, e *Exit) bool {
+	if p.servingLocked(e.IP) {
+		return false
+	}
+	now := time.Now()
+	// 只有"链路坏了"才允许无条件换凭据（换一个兄弟账号是它唯一的翻身机会）；
+	// 单纯撞 429 冷却说明链路是通的，额度也挂在机器上，轮换凭据毫无意义。
+	failing := p.brokenLocked(e.IP, now)
+	if !failing && !credLess(e, old) {
+		// 不在供货也没坏：两种凭据都"没试过"，那就认现有的这份，别每轮抖动。
+		// 到期时间仍然跟着面板走。
+		if e.ExpireAt != 0 {
+			old.ExpireAt = e.ExpireAt
+		}
+		return false
+	}
+	portChanged := old.Port != e.Port
+	old.User, old.Secret, old.Port, old.Channel = e.User, e.Secret, e.Port, e.Channel
+	old.ExpireAt = e.ExpireAt
+	old.Born = now
+	// 健康池按 token 存（含端口），端口变了旧条目就对不上。上面已排除正在供货的
+	// 情形，这里只可能是残留，顺手收干净。
+	if portChanged {
+		p.dropHealthLocked(e.IP)
+	}
+	return true
+}
+
+// servingLocked 报告该 ip 此刻是否在健康池里供货。
+func (p *Pool) servingLocked(ip string) bool {
+	for _, cur := range p.health {
+		if cur.IP == ip {
+			return true
+		}
+	}
+	return false
+}
+
+// brokenLocked 报告该 ip 是否躺在"连不上"的池子里（缓冲池或坏池），不含单纯撞
+// 429 的冷却池——冷却只说明额度被打空，链路本身是通的。
+func (p *Pool) brokenLocked(ip string, now time.Time) bool {
+	if h, ok := p.buffer[ip]; ok && h.Until.After(now) {
+		return true
+	}
+	if t, ok := p.dead[ip]; ok && t.After(now) {
+		return true
+	}
+	return false
 }
 
 // PruneExpired 清掉面板上已过期的出口。
