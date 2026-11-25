@@ -71,10 +71,12 @@ type anonymousNodes struct {
 	nodes    []*anonymousNode
 	next     atomic.Uint64
 	cooldown time.Duration
-	// quotaPark bounds the cool-down a 429 may apply. The free tier counts
-	// the daily allowance per egress IP and its Retry-After counts down to the
-	// reset, so a node that reports the quota error is useless until then.
-	// Zero keeps the short cool-down that only skips it for a moment.
+	// quotaPark bounds the cool-down a 429 may apply. The free tier does hold a
+	// small allowance per egress, but the Retry-After it reports counts down to
+	// the next 00:00 UTC daily reset while the allowance itself refills within
+	// minutes: the same exit on the same model answers 200 again shortly after.
+	// Zero keeps the short cool-down, which is what the measurements support; a
+	// large value parks a usable exit for a day.
 	quotaPark time.Duration
 	// onPark reports one exit parked by the quota window so the controller can
 	// persist it; a rebuilt runtime restores it instead of retrying a spent IP.
@@ -435,6 +437,13 @@ func (p *anonymousNodes) RestoreProxy(proxy *proxyTransport) int {
 // that entry for the hint would retire a healthy entry over a block it will never
 // reuse, and the lane would answer 429 for hours with no attempt made. Measured
 // directly: the same entry 429s on one connection and succeeds on the next.
+//
+// Re-measured 2026-11-26 with the pool probe, which pins the mechanism: the answer flips
+// on the *same* egress (public IP constant across eight requests) and on the *same* model,
+// and independently of the project id, so what flips is the egress's small free allowance
+// emptying and refilling, not a backend or IP lottery. See ground-truth.md, "The 429
+// ledger". The cap stays: the allowance refills in minutes, and Retry-After always names
+// 08:00.
 //
 // Key lanes are different and keep honoring Retry-After in full.
 const maxAnonymousRetryAfterMultiplier = 8

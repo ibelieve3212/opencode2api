@@ -28,9 +28,10 @@ type ExitProbeResult struct {
 	Body    string `json:"body,omitempty"`
 	Err     string `json:"err,omitempty"`
 	Latency int64  `json:"latency_ms"`
-	// RetryAfter 是上游 429 响应要求等待的时长（优先 retry-after-ms，回退
-	// Retry-After，两者都支持秒/小数/HTTP 日期）。上游给了就按它冷却这个出口，
-	// 不给再由报文正文/兜底值决定。
+	// RetryAfter 是上游 429 响应写明的等待时长（优先 retry-after-ms，回退
+	// Retry-After，两者都支持秒/小数/HTTP 日期）。**只作参考，不能拿它给出口定时长**：
+	// 实测它恒指向次日 08:00（北京时间）的日窗口重置（00:52 时给 7h8m20s），而同一个
+	// 出口几分钟后就能再拿到 200。压多久由 internal/pool 的 429 阶梯决定。
 	RetryAfter time.Duration `json:"retry_after_ms,omitempty"`
 }
 

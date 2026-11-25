@@ -293,12 +293,14 @@ type PerformanceConfig struct {
 	// abusive stays out of the anonymous cursor. Upstream does not publish
 	// the block duration, so the default is a conservative 15 minutes.
 	FreeTierBlockSeconds int `json:"free_tier_block_seconds"`
-	// QuotaParkSeconds bounds how long a 429 parks one exit. The free tier
-	// answers 429 with a Retry-After that counts down to the next 00:00 UTC,
-	// which is when the daily allowance resets, so an exit that reports the
-	// quota error is useless until then. Zero keeps the old short cool-down
-	// (failure_cooldown_seconds times eight); set it to 86400 to park the
-	// exit for the rest of the quota window.
+	// QuotaParkSeconds bounds how long a 429 parks one exit. Zero keeps the
+	// short cool-down (failure_cooldown_seconds times eight), which is the
+	// measured-correct behaviour: the free tier answers 429 with a Retry-After
+	// that counts down to the next 00:00 UTC, but that dates the daily window,
+	// not this exit — the same exit on the same model answers 200 again minutes
+	// later. See ground-truth.md, "The 429 ledger". Setting 86400 parks every
+	// exit that reports one 429 for the rest of the day, and is kept only so a
+	// deployment can roll back to the older behaviour.
 	QuotaParkSeconds int `json:"quota_park_seconds"`
 }
 

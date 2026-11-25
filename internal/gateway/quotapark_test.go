@@ -7,9 +7,10 @@ import (
 	"time"
 )
 
-// TestQuotaParkUsesRetryAfter 断言 429 会按 Retry-After 停用到额度重置时刻，
-// 而不是被 120 秒的短上限截断。免费层的 Retry-After 恒等于距下一个 00:00 UTC
-// 的秒数，实测抓到的是 48495。
+// TestQuotaParkUsesRetryAfter 断言配置了 quotaPark 时，429 会按 Retry-After 停用到
+// 该上限，而不是被 120 秒的短上限截断。这条只测上限机制本身：实测支持的行为是
+// 不配置 quotaPark（见 ground-truth.md 的 "The 429 ledger"），因为 Retry-After
+// 恒指向次日 08:00 的日窗口重置，而同一个出口几分钟后就能再拿到 200。
 func TestQuotaParkUsesRetryAfter(t *testing.T) {
 	nodes := &anonymousNodes{cooldown: 15 * time.Second, quotaPark: 24 * time.Hour}
 	node := &anonymousNode{}
@@ -25,8 +26,8 @@ func TestQuotaParkUsesRetryAfter(t *testing.T) {
 	}
 }
 
-// TestQuotaParkIgnoresOtherStatuses 断言非 429 的 Retry-After 仍走短上限：
-// 一个异常头部不能把节点停一整天。
+// TestQuotaParkIgnoresOtherStatuses 断言非 429 的 Retry-After 仍走短上限，
+// 免得一个杂散响应头把节点按额度墙停一整天。
 func TestQuotaParkIgnoresOtherStatuses(t *testing.T) {
 	nodes := &anonymousNodes{cooldown: 15 * time.Second, quotaPark: 24 * time.Hour}
 	node := &anonymousNode{}
@@ -42,8 +43,8 @@ func TestQuotaParkIgnoresOtherStatuses(t *testing.T) {
 	}
 }
 
-// TestQuotaParkDisabledKeepsShortCooldown 断言默认配置（0）保持旧行为，
-// 这样升级本身不会改变任何现有部署的节奏。
+// TestQuotaParkDisabledKeepsShortCooldown 断言默认配置（0）走短冷却，也就是实测
+// 支持的行为：撞一次 429 只跳过一小会儿，而不是把出口按日窗口停掉。
 func TestQuotaParkDisabledKeepsShortCooldown(t *testing.T) {
 	nodes := &anonymousNodes{cooldown: 15 * time.Second}
 	node := &anonymousNode{}

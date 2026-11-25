@@ -34,9 +34,9 @@ func TestDeadBackoffLadder(t *testing.T) {
 	}
 }
 
-// 429 不是"这个出口当天没额度了"：同一个出口隔两秒重问就 200，报文里的
-// Retry-After 说的是上游那个没额度的后端。所以判决里不许再带"该睡到什么时候"，
-// 冷却时长一律按阶梯给。
+// 429 不是"这个出口当天没额度了"：同一出口 3 次 200 后转 429、几分钟后又回 200，
+// 报文的 Retry-After 恒指向次日 08:00 的日窗口重置。所以判决里不许再带"该睡到
+// 什么时候"，冷却时长一律按阶梯给。
 func TestQuotaLadderIgnoresRetryAfter(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.QuotaBackoff = 2 * time.Minute
@@ -67,15 +67,15 @@ func TestQuotaLadderIgnoresRetryAfter(t *testing.T) {
 		}
 	}
 
-	// 探通了就说明那次 429 是抽签抽输的，阶梯也得从头算。
+	// 探通了就说明那次 429 只是额度一时被打空，阶梯也得从头算。
 	p.Admit(e)
 	if got := p.Cool(e).Sub(time.Now()); got > 8*time.Minute {
 		t.Fatalf("探通后再撞 429 应从第一级重来，实际 %s", got.Round(time.Second))
 	}
 }
 
-// 探通一次就是一个真实请求，会吃掉出口当天的免费额度。额度用完就必须停止复验，
-// 否则 15 分钟一轮的租约复验会把它一天的额度全烧在门槛自己身上。
+// 探通一次就是一个真实请求，会吃掉出口跟真实用户共用的免费额度。额度用完就必须
+// 停止复验，否则 15 分钟一轮的租约复验会把这份额度全烧在门槛自己身上。
 func TestProbeBudgetStopsRecheck(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ProbeBudget = 3
