@@ -15,6 +15,7 @@ func parseFlags() options {
 	flag.IntVar(&o.socksPort, "socks-port", 31081, "SOCKS5 端口（2api 用）")
 	flag.IntVar(&o.tokenPort, "token-port", 28080, "逐出口 token 的 HTTP 代理端口")
 	flag.IntVar(&o.rrPort, "rr-port", 38081, "健康池轮询 HTTP 代理端口")
+	flag.IntVar(&o.healthPort, "health-port", 8082, "健康检查端口（/healthz 存活，/readyz 可派发；0 = 关闭）")
 	flag.StringVar(&o.nodesFile, "nodes-file", "/data/state/nodes.txt", "健康池导出文件")
 	flag.StringVar(&o.exportHost, "export-host", "127.0.0.1", "nodes.txt 里写的地址")
 	flag.IntVar(&o.healthTarget, "health-target", 200, "健康池目标数量")

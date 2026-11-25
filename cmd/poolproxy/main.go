@@ -36,6 +36,7 @@ type options struct {
 	socksPort     int
 	tokenPort     int
 	rrPort        int
+	healthPort    int
 	nodesFile     string
 	exportHost    string
 	healthTarget  int
@@ -144,6 +145,14 @@ func run(o options) error {
 			log.Printf("轮询代理监听失败: %v", err)
 		}
 	}()
+	// 容器健康检查：端口 0 表示不要（本地直接跑 / 已有外部探活时）。
+	if o.healthPort > 0 {
+		go func() {
+			if err := ls.ServeHealth(ctx, fmt.Sprintf("%s:%d", o.bind, o.healthPort)); err != nil {
+				log.Printf("健康检查监听失败: %v", err)
+			}
+		}()
+	}
 
 	// 渠道保鲜：本地快照是主体。但首轮必须全量拉一遍——否则 67 个渠道
 	// 按每轮 8 个轮换，要一个多小时才能把所有池子的出口收齐，在这期间

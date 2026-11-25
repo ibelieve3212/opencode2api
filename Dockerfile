@@ -64,7 +64,9 @@ WORKDIR /app
 
 EXPOSE 8080 8081
 
+# 健康检查端口随运行模式变：opencode2api 在 8080，poolproxy 用 -health-port。
+# 同一个镜像两种跑法，写死端口会让另一个模式永远打到别人的端口上拿 404。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
+    CMD wget -q -O /dev/null "http://127.0.0.1:${HEALTH_PORT:-8080}/healthz" || exit 1
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint"]

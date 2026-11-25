@@ -247,6 +247,52 @@ func (l *Listener) handleRR(conn net.Conn) {
 	conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"))
 }
 
+// ServeHealth 提供容器健康检查端点。
+//
+// 两个端点故意分开：
+//   - /healthz 只回答"进程活着、池子读开了"，用于 Docker HEALTHCHECK。
+//   - /readyz  回答"现在能不能派出口"，总池和健康池都空才 503。
+//
+// 合并成一个会在上游整体 429 时把容器判成 unhealthy —— 那是上游的墙，
+// 重启本地进程解决不了，只会把攒下的状态丢掉重来一遍。
+func (l *Listener) ServeHealth(ctx context.Context, addr string) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{Handler: l.HealthMux()}
+	l.log("健康检查监听 %s（/healthz 存活，/readyz 可派发）", addr)
+	go func() { <-ctx.Done(); srv.Close() }()
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+// HealthMux 单独暴露，测试才能直接打，不用先抢一个真端口。
+func (l *Listener) HealthMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		st := l.Pool.Snapshot()
+		fmt.Fprintf(w, `{"status":"ok","master":%d,"health":%d}`, st.Master, st.Health)
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		st := l.Pool.Snapshot()
+		code := http.StatusOK
+		if st.Master == 0 && st.Health == 0 {
+			// 只在一条出口都没有时才判"不可派发"：健康池空但总池有货，
+			// 说明门槛正在过，是正常的采样中途状态，不该被编排器重启。
+			code = http.StatusServiceUnavailable
+		}
+		w.WriteHeader(code)
+		fmt.Fprintf(w, `{"master":%d,"health":%d,"buffer":%d,"cool":%d,"dead":%d}`,
+			st.Master, st.Health, st.Buffer, st.Cool, st.Dead)
+	})
+	return mux
+}
+
 func (l *Listener) dialTimeout() time.Duration {
 	if l.DialTimeout > 0 {
 		return l.DialTimeout
