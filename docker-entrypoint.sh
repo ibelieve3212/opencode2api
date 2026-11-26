@@ -9,13 +9,29 @@ config_seed_path=${CONFIG_SEED_PATH:-}
 listen_address=${LISTEN_ADDRESS:-}
 webui_listen_address=${WEBUI_LISTEN_ADDRESS:-}
 
+# This image ships three programs. A first argument that is not a flag names
+# the one to run, so poolproxy and exitprobe stay reachable without an
+# --entrypoint override:
+#   docker run IMAGE poolproxy -channels /data/channels.json -health-port 8082
+# A leading flag can only belong to the default program. Passing it to
+# `exec "$@"` instead is what used to fail with "illegal option -c" and leave
+# the container restarting.
+program=/usr/local/bin/opencode2api
+leading_flags=0
+if [ "$#" -gt 0 ]; then
+    case "$1" in
+        -*) leading_flags=1 ;;
+        *) program=$1 ;;
+    esac
+fi
+
 if [ "$(id -u)" = "0" ]; then
     mkdir -p "$state_dir"
     chown opencode2api:opencode2api "$state_dir"
     exec su-exec opencode2api:opencode2api "$0" "$@"
 fi
 
-if [ "$#" -gt 0 ]; then
+if [ "$program" != /usr/local/bin/opencode2api ]; then
     exec "$@"
 fi
 
@@ -43,9 +59,17 @@ if [ ! -f "$config_path" ]; then
     fi
 fi
 
-set -- /usr/local/bin/opencode2api -config "$config_path"
+# Flags given without naming the program are appended to the default one, so
+# `docker run IMAGE -listen 0.0.0.0:9000` works as written. The explicit
+# overrides above only apply when the operator names no flags of their own.
+if [ "$leading_flags" = 1 ]; then
+    exec /usr/local/bin/opencode2api -config "$config_path" "$@"
+fi
+
 if [ -n "$listen_address" ]; then
-    set -- "$@" -listen "$listen_address"
+    set -- /usr/local/bin/opencode2api -config "$config_path" -listen "$listen_address"
+else
+    set -- /usr/local/bin/opencode2api -config "$config_path"
 fi
 if [ -n "$webui_listen_address" ]; then
     set -- "$@" -web-listen "$webui_listen_address"
