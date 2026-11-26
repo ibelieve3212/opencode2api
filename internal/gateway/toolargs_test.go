@@ -263,9 +263,14 @@ func v1SchemaTools() []any {
 
 // TestV1ShapedDefinitionIsTheOfficialOne 断言 1.x 通道发出的定义也是整块官方 v1 定义，
 // 参数映射按 v1 的 filePath 计算，而不是照搬 v2 的 path。
+//
+// 平台显式钉成 linux：officialTool 会按平台重写 v1 bash 的描述（windows 换成
+// powershell、darwin 换成 macOS），传空串时取 runtime.GOOS，于是这条断言在
+// Windows 开发机上会拿被重写过的描述去比原始定义。生产跑在 linux 容器里，钉住
+// linux 才是被验证的行为。
 func TestV1ShapedDefinitionIsTheOfficialOne(t *testing.T) {
 	payload := map[string]any{"tools": v1SchemaTools()}
-	if _, ok := renameAndCompleteTools(payload, protocol.Chat, true, ""); !ok {
+	if _, ok := renameAndCompleteTools(payload, protocol.Chat, true, "linux"); !ok {
 		t.Fatalf("shaping declined")
 	}
 	shaped := payload["tools"].([]any)
