@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -240,25 +239,38 @@ func (g *Gateway) StartModelRefresh(ctx context.Context) {
 }
 
 // refreshProtocolCapabilities fetches OpenCode's capability catalog through
-// each healthy proxy in turn until one succeeds. Only a gateway without any
-// transport falls back to a direct client.
+// each healthy proxy in turn until one succeeds, then directly.
+//
+// The capability endpoint is a public static asset host: fetching it needs a
+// reachable network, not a fresh exit quota. The direct fallback is what breaks
+// a deadlock the proxy-only version had. When every exit is under the free
+// tier's 429 wall there are no healthy proxies at all, so this refresh failed
+// on every tick, the catalog went stale, /healthz reported model_catalog_stale
+// and no exit was ever re-listed, so nothing could ever recover. Catalog
+// metadata must not be gated on the quota the pool is still trying to measure.
 func (g *Gateway) refreshProtocolCapabilities(ctx context.Context) (modelcatalog.Capabilities, error) {
-	if g.transports == nil || len(g.transports.items) == 0 {
-		return modelcatalog.FetchCapabilities(ctx, &http.Client{Timeout: 30 * time.Second}, modelcatalog.CapabilitiesURL)
-	}
 	var lastErr error
-	for _, proxy := range g.transports.items {
-		if proxy == nil || !proxy.healthy.Load() {
-			continue
+	if g.transports != nil {
+		for _, proxy := range g.transports.items {
+			if proxy == nil || !proxy.healthy.Load() {
+				continue
+			}
+			capabilities, err := modelcatalog.FetchCapabilities(ctx, proxy.client, modelcatalog.CapabilitiesURL)
+			if err == nil {
+				return capabilities, nil
+			}
+			lastErr = err
 		}
-		capabilities, err := modelcatalog.FetchCapabilities(ctx, proxy.client, modelcatalog.CapabilitiesURL)
-		if err == nil {
-			return capabilities, nil
-		}
-		lastErr = err
+	}
+	if ctx.Err() != nil {
+		return modelcatalog.Capabilities{}, ctx.Err()
+	}
+	capabilities, err := modelcatalog.FetchCapabilities(ctx, &http.Client{Timeout: 30 * time.Second}, modelcatalog.CapabilitiesURL)
+	if err == nil {
+		return capabilities, nil
 	}
 	if lastErr == nil {
-		lastErr = errors.New("no healthy proxy available for OpenCode capability catalog")
+		lastErr = err
 	}
 	return modelcatalog.Capabilities{}, lastErr
 }
@@ -321,6 +333,30 @@ func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []strin
 		}
 		g.anonymous.MarkFailure(node, nil, err)
 		g.logger.Debug("anonymous model catalog refresh attempt failed", "component", "models", "event", "anonymous_refresh_attempt_failed", "upstream", config.RedactURL(base), "attempt", attempt, "proxy", config.RedactURL(node.proxy.name), "error", err)
+	}
+	if models := g.refreshAnonymousDirect(ctx, base); models != nil {
+		return models
+	}
+	g.logger.Warn("anonymous model catalog refresh failed", "component", "models", "event", "anonymous_refresh_failed", "upstream", config.RedactURL(base))
+	return nil
+}
+
+// refreshAnonymousDirect lists the anonymous models without any proxy. It is
+// the last resort when the pool has no exit to lend. The model list is public
+// metadata served to an unauthenticated client, and the free-tier 429 wall
+// applies to chat completions, not to /v1/models: a spent pool used to keep the
+// old catalog on disk while the origin was still listing models fine.
+func (g *Gateway) refreshAnonymousDirect(ctx context.Context, base string) []string {
+	refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	client := &http.Client{Timeout: 30 * time.Second}
+	for _, upstream := range g.anonymousUpstreams() {
+		models, _, err := modelcatalog.FetchModels(refreshCtx, client, upstream, anonymousZenKey)
+		if err == nil {
+			// Listings are metadata. Reporting them as lane success would close
+			// the anonymous breaker and hide a spent pool from the chat lane.
+			return models
+		}
 	}
 	g.logger.Warn("anonymous model catalog refresh failed", "component", "models", "event", "anonymous_refresh_failed", "upstream", config.RedactURL(base))
 	return nil
