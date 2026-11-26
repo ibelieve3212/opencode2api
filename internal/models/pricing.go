@@ -171,20 +171,27 @@ func (store *PricingRegistry) SetClientProvider(provider func() []*http.Client) 
 	store.clientProvider = provider
 }
 
-// refreshClients returns the provider's clients, or the registry's own direct
-// client when no provider is set or it offers none.
+// refreshClients returns the clients to try, most preferred first: the
+// provider's proxy clients, then the registry's own direct client. The direct
+// client is always tried last, so a pool whose exits exist but all fail cannot
+// starve the refresh. The metadata endpoint is public, and a free-tier quota
+// wall that answers 429 on chat completions still answers it, so the direct
+// attempt succeeds exactly when the proxies cannot be used. Without it the
+// pricing metadata froze for as long as every exit stayed down.
 func (store *PricingRegistry) refreshClients() []*http.Client {
 	store.mu.RLock()
 	provider := store.clientProvider
 	store.mu.RUnlock()
-	if provider == nil {
-		return []*http.Client{store.client}
+	clients := make([]*http.Client, 0, 2)
+	if provider != nil {
+		clients = append(clients, provider()...)
 	}
-	clients := provider()
-	if len(clients) == 0 {
-		return []*http.Client{store.client}
+	for _, client := range clients {
+		if client == store.client {
+			return clients
+		}
 	}
-	return clients
+	return append(clients, store.client)
 }
 
 // Start refreshes the metadata at once and then periodically until ctx ends.
